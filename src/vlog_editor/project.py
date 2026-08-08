@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+DEFAULT_CONFIG: dict[str, Any] = {
+    "title": "My Vlog",
+    "language": "auto",
+    "target_duration_sec": 180,
+    "style": "warm cinematic travel vlog",
+    "output": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "video_codec": "auto",
+    },
+    "asr": {
+        "model": "large-v3-turbo",
+        "device": "cuda",
+        "compute_type": "int8_float16",
+    },
+    "vision": {
+        "endpoint": "http://127.0.0.1:11434",
+        "model": "qwen3-vl:4b-instruct",
+        "frame_width": 1280,
+        "max_output_tokens": 240,
+        "keep_alive": "30m",
+    },
+    "bgm": {
+        "file": None,
+        "volume": 0.12,
+    },
+}
+
+
+@dataclass(frozen=True)
+class Episode:
+    root: Path
+    config: dict[str, Any]
+
+    @property
+    def footage(self) -> Path:
+        return self.root / "footage"
+
+    @property
+    def work(self) -> Path:
+        return self.root / "work"
+
+    @property
+    def output(self) -> Path:
+        return self.root / "output"
+
+    @property
+    def analysis_path(self) -> Path:
+        return self.work / "clip_analysis.json"
+
+    @property
+    def plan_path(self) -> Path:
+        return self.work / "edit_plan.json"
+
+    @property
+    def approval_path(self) -> Path:
+        return self.work / "approval.json"
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def resolve_episode(path: str | Path) -> Episode:
+    root = Path(path).expanduser().resolve()
+    config_path = root / "project.yaml"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Missing {config_path}. Run `ve new {root}` first.")
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise TypeError("project.yaml must contain a mapping")
+    return Episode(root=root, config=_deep_merge(DEFAULT_CONFIG, raw))
+
+
+def create_episode(path: str | Path, *, force: bool = False) -> Episode:
+    root = Path(path).expanduser().resolve()
+    if root.exists() and any(root.iterdir()) and not force:
+        raise FileExistsError(f"Refusing to overwrite non-empty directory: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    for name in ("footage", "work", "output"):
+        (root / name).mkdir(exist_ok=True)
+    config_path = root / "project.yaml"
+    if force or not config_path.exists():
+        config_path.write_text(
+            yaml.safe_dump(DEFAULT_CONFIG, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+    return resolve_episode(root)
+
+
+def write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp.replace(path)
+
+
+def read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
