@@ -642,8 +642,16 @@ def build_balanced_fallback_plan(
             selection["_role"] = "middle"
             _commit(selection)
 
-    # Reserve one chronological best clip for each required setting.
+    # Reserve coverage for each required setting.
     # Use the full middle cap here so diversity is not blocked by the late-day hold.
+    # Late-day settings (night mall, etc.) get several distinct files up front;
+    # daytime settings stay at one reserved beat so play-heavy mornings cannot
+    # monopolize the reserve pass.
+    late_settings = {
+        infer_setting(clip)
+        for clip in pool[late_index:]
+        if infer_setting(clip) != "other"
+    }
     for setting in required_settings:
         candidates = [
             clip
@@ -654,14 +662,21 @@ def build_balanced_fallback_plan(
         ]
         if not candidates:
             continue
-        best = max(candidates, key=_clip_score)
-        # One beat each during diversity reserve; extra play beats come from
-        # chronological fill so a long daytime setting cannot crowd out night.
-        _try_add(
-            best,
-            allow_extra_beats=False,
-            respect_late_reserve=False,
-        )
+        candidates.sort(key=_clip_score, reverse=True)
+        reserve_limit = 3 if setting in late_settings else 1
+        reserved = 0
+        for source in candidates:
+            if reserved >= reserve_limit:
+                break
+            filename = str(source.get("metadata", {}).get("filename", ""))
+            before = filename in selected_files
+            _try_add(
+                source,
+                allow_extra_beats=False,
+                respect_late_reserve=False,
+            )
+            if not before and filename in selected_files:
+                reserved += 1
 
     # Fill remaining budget in capture order so story time never jumps backward.
     for source in pool:
