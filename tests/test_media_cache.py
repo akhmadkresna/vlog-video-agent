@@ -10,7 +10,9 @@ def test_sample_times_follow_clip_duration_policy() -> None:
     assert len(sample_times(10)) == 3
     assert len(sample_times(30)) == 5
     assert len(sample_times(75)) == 5
+    assert len(sample_times(800)) == 12
     assert all(0 <= value <= 10 for value in sample_times(10))
+    assert sample_times(800)[-1] > 790
 
 
 def test_cache_key_changes_with_file_content_and_settings(tmp_path: Path) -> None:

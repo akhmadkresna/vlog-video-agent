@@ -43,7 +43,8 @@ def probe_video(path: Path) -> dict[str, Any]:
     streams = payload.get("streams", [])
     video = next((stream for stream in streams if stream.get("codec_type") == "video"), {})
     audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
-    duration = float(payload.get("format", {}).get("duration") or video.get("duration") or 0)
+    format_info = payload.get("format", {}) or {}
+    duration = float(format_info.get("duration") or video.get("duration") or 0)
     width = int(video.get("width") or 0)
     height = int(video.get("height") or 0)
     rotation = 0
@@ -53,6 +54,12 @@ def probe_video(path: Path) -> dict[str, Any]:
             break
     if abs(rotation) in (90, 270):
         width, height = height, width
+    tags = format_info.get("tags") or {}
+    capture_time = (
+        tags.get("creation_time")
+        or tags.get("com.apple.quicktime.creationdate")
+        or tags.get("creation_date")
+    )
     return {
         "filename": path.name,
         "duration": round(duration, 3),
@@ -63,6 +70,7 @@ def probe_video(path: Path) -> dict[str, Any]:
         "video_codec": video.get("codec_name"),
         "has_audio": audio is not None,
         "audio_codec": audio.get("codec_name") if audio else None,
+        "capture_time": str(capture_time) if capture_time else None,
     }
 
 
@@ -83,8 +91,13 @@ def sample_times(duration: float) -> list[float]:
     elif duration <= 60:
         values = [margin + (duration - 2 * margin) * idx / 4 for idx in range(5)]
     else:
-        count = max(5, math.ceil(duration / 15))
-        values = [min(duration - margin, margin + idx * 15) for idx in range(count)]
+        # Keep long clips representative without creating an unbounded Ollama
+        # request. Too many images can exceed the vision model's context.
+        count = min(12, max(5, math.ceil(duration / 15)))
+        values = [
+            margin + (duration - 2 * margin) * idx / (count - 1)
+            for idx in range(count)
+        ]
     return sorted({round(max(0.0, min(duration, value)), 3) for value in values})
 
 

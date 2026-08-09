@@ -45,12 +45,65 @@ uv run ve render D:\Videos\my-trip
 If `work/edit_plan.json` changes after approval, rendering is blocked until it is reviewed and
 approved again.
 
+## Episode duration
+
+New episodes use `target_duration_sec: auto`. After footage analysis, the planner derives a
+deterministic target from unique source duration and visual quality, bounded to keep short
+projects feasible and long projects reviewable. The LLM receives that target as a constraint;
+it does not choose an unlimited duration.
+
+Vision analysis also assigns a normalized setting category. Plan validation requires coverage
+of up to four available settings and rejects edits where one setting consumes more than 40%,
+so scene diversity is enforced rather than left only to the planning prompt. Older cached
+analysis is classified deterministically from its visual summaries.
+
+Plans are chronological. Capture timestamps from media metadata become first-class analysis
+fields. Duplicate `Copy` files are ignored in favor of originals, multi-day folders use the
+primary capture day with the most usable footage, and validation rejects capture-time
+regressions. The review dashboard shows edit-timeline clocks plus source ranges.
+
+Set a positive number of seconds in `project.yaml` when a fixed duration is required:
+
+```yaml
+target_duration_sec: 360
+```
+
+`setting_order` is only a soft preference for which settings to prioritize when filling
+duration budgets. Capture chronology always wins for story order.
+
+## License-free SFX and BGM
+
+Episodes include an `audio/` pack for funny Indo-kids style punctuation.
+New or virgin packs seed bundled CC0 classics, Pixabay kids BGM beds, and optional
+`sfx/meme/` roles (`user_provided`) — not scraped from YouTube/CapCut.
+
+```text
+audio/
+  bgm/
+  sfx/boing|pop|whoosh|sparkle|rimshot|fail|success|meme/
+  pack.yaml
+```
+
+Allowed licenses in `pack.yaml`:
+
+- `cc0`
+- `public_domain`
+- `youtube_audio_library`
+- `pixabay`
+- `original`
+- `user_provided` (local meme drops with a `role`)
+
+The planner places SFX on the edit timeline (transitions, laughs, meme punch moments)
+with classic fallbacks, and never auto-downloads audio at runtime. See
+[`docs/audio-license-free.md`](docs/audio-license-free.md).
+
 ## Commands
 
 - `ve doctor [episode]`: check FFmpeg, CUDA, faster-whisper, Ollama and the model.
-- `ve new <path>`: create `project.yaml`, `footage/`, `work/` and `output/`.
+- `ve new <path>`: create `project.yaml`, `footage/`, `audio/`, `work/` and `output/`.
 - `ve analyze [episode]`: cache transcription and multi-frame visual analysis.
 - `ve plan [episode]`: generate and deterministically validate an edit plan.
+- `ve plan [episode] --balanced`: build a fast deterministic chronological plan from cached analysis.
 - `ve preview [episode]`: generate/open the local dashboard.
 - `ve approve [episode]`: approve the SHA-256 digest of the current plan.
 - `ve render [episode]`: render and verify `output/final.mp4`.
@@ -80,6 +133,10 @@ plus frame extraction and transcription.
 my-trip/
 ├── project.yaml
 ├── footage/                 # read-only source videos
+├── audio/                   # license-free BGM/SFX pack
+│   ├── pack.yaml
+│   ├── bgm/
+│   └── sfx/
 ├── work/
 │   ├── cache/
 │   ├── frames/

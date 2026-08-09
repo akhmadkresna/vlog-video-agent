@@ -37,10 +37,36 @@ def require_approval(episode: Episode) -> None:
         raise PermissionError("Plan changed after approval. Review and approve it again.")
 
 
-def _clip_cards(episode: Episode, plan: dict[str, Any]) -> str:
+def _thumbnail_path(
+    dashboard: Path,
+    source: Path,
+    *,
+    start: float,
+    end: float,
+) -> Path:
+    stat = source.stat()
+    identity = (
+        f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|"
+        f"{start:.3f}|{end:.3f}"
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+    return dashboard / "assets" / f"thumb_{digest}.jpg"
+
+
+def format_clock(seconds: float) -> str:
+    total = max(0, round(seconds))
+    minutes, secs = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def _clip_cards(episode: Episode, plan: dict[str, Any]) -> tuple[str, set[Path]]:
     cards: list[str] = []
-    index = 0
+    used_thumbnails: set[Path] = set()
     dashboard = episode.work / "dashboard"
+    timeline_cursor = 0.0
     for section_index, section in enumerate(plan.get("structure", []), start=1):
         cards.append(
             f'<section><h2>{section_index}. {html.escape(str(section.get("section", "")))}</h2>'
@@ -48,24 +74,30 @@ def _clip_cards(episode: Episode, plan: dict[str, Any]) -> str:
             '<div class="grid">'
         )
         for clip in section.get("clips", []):
-            index += 1
             source = episode.footage / str(clip["file"])
-            thumb_path = dashboard / "assets" / f"clip_{index:04d}.jpg"
-            thumbnail(source, thumb_path, (float(clip["start"]) + float(clip["end"])) / 2)
+            start = float(clip["start"])
+            end = float(clip["end"])
+            thumb_path = _thumbnail_path(dashboard, source, start=start, end=end)
+            thumbnail(source, thumb_path, (start + end) / 2)
+            used_thumbnails.add(thumb_path)
             relative = thumb_path.relative_to(dashboard).as_posix()
-            duration = float(clip["end"]) - float(clip["start"])
+            duration = end - start
+            timeline_start = timeline_cursor
+            timeline_end = timeline_cursor + duration
+            timeline_cursor = timeline_end
             subtitle = html.escape(str(clip.get("subtitle", "")))
             cards.append(
                 '<article class="card">'
                 f'<img src="{relative}" alt="">'
                 f'<div class="body"><strong>{html.escape(str(clip["file"]))}</strong>'
-                f'<div class="time">{float(clip["start"]):.2f}s → '
-                f'{float(clip["end"]):.2f}s · {duration:.2f}s</div>'
+                f'<div class="time">Edit {format_clock(timeline_start)} → '
+                f'{format_clock(timeline_end)} · {duration:.2f}s</div>'
+                f'<div class="source">Source {start:.2f}s → {end:.2f}s</div>'
                 f'<p>{html.escape(str(clip.get("note", "")))}</p>'
                 f'<p class="speech">{subtitle}</p></div></article>'
             )
         cards.append("</div></section>")
-    return "".join(cards)
+    return "".join(cards), used_thumbnails
 
 
 def generate_dashboard(episode: Episode, *, open_browser: bool = True) -> Path:
@@ -74,7 +106,68 @@ def generate_dashboard(episode: Episode, *, open_browser: bool = True) -> Path:
     plan = read_json(episode.plan_path)
     dashboard = episode.work / "dashboard"
     dashboard.mkdir(parents=True, exist_ok=True)
-    cards = _clip_cards(episode, plan)
+    cards, used_thumbnails = _clip_cards(episode, plan)
+    assets = dashboard / "assets"
+    if assets.is_dir():
+        for old_thumbnail in assets.glob("*.jpg"):
+            if old_thumbnail not in used_thumbnails:
+                old_thumbnail.unlink()
+
+    bgm = plan.get("bgm") if isinstance(plan.get("bgm"), dict) else None
+    bgm_bed_items: list[str] = []
+    if bgm and bgm.get("file"):
+        mode = str(bgm.get("mode", "full"))
+        bgm_text = (
+            f"{bgm.get('file')} · mode {mode} · license {bgm.get('license', 'unknown')} · "
+            f"vol {float(bgm.get('volume', 0.1)):.2f}"
+        )
+        if bgm.get("attribution"):
+            bgm_text += f" · credit {bgm['attribution']}"
+        for segment in bgm.get("segments") or []:
+            if not isinstance(segment, dict):
+                continue
+            start = float(segment.get("start_sec", 0))
+            end = float(segment.get("end_sec", 0))
+            track = Path(str(segment.get("file") or bgm.get("file") or "")).name
+            bgm_bed_items.append(
+                "<li>"
+                f"<code>{html.escape(format_clock(start))}"
+                f"-{html.escape(format_clock(end))}</code> · "
+                f"vol {float(segment.get('volume', 0.12)):.2f} · "
+                f"{html.escape(track)} · "
+                f"{html.escape(str(segment.get('reason', '')))}"
+                "</li>"
+            )
+    else:
+        bgm_text = str(plan.get("bgm_suggestion", "") or "none")
+    beds_html = (
+        "<ul class='cues'>" + "".join(bgm_bed_items) + "</ul>"
+        if bgm_bed_items
+        else (
+            "<p class='description'>Whole-edit BGM (no beds), or music disabled.</p>"
+            if bgm and bgm.get("file")
+            else ""
+        )
+    )
+
+    cue_items = []
+    for cue in plan.get("audio_cues", []) or []:
+        if not isinstance(cue, dict):
+            continue
+        cue_items.append(
+            "<li>"
+            f"<code>{html.escape(format_clock(float(cue.get('at_sec', 0))))}</code> · "
+            f"{html.escape(str(cue.get('type', '')))} · "
+            f"{html.escape(str(cue.get('license', '')))} · "
+            f"{html.escape(str(cue.get('reason', '')))}"
+            "</li>"
+        )
+    cues_html = (
+        "<ul class='cues'>" + "".join(cue_items) + "</ul>"
+        if cue_items
+        else "<p class='description'>No SFX cues (empty license-free pack or audio disabled).</p>"
+    )
+
     page = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -87,13 +180,20 @@ header{{background:#171d27;border-bottom:1px solid #293242}} h1{{margin:0 0 8px}
 grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}} .card{{background:#171d27;
 border:1px solid #293242;border-radius:10px;overflow:hidden}} img{{width:100%;aspect-ratio:16/9;
 object-fit:cover;background:#080a0d}} .body{{padding:14px}} .time{{font:13px ui-monospace;
-color:#7dd3fc;margin-top:6px}} .speech{{color:#e8bd72}} code{{color:#7dd3fc}}
+color:#7dd3fc;margin-top:6px}} .source{{font:12px ui-monospace;color:#9ca9ba;margin-top:4px}}
+.speech{{color:#e8bd72}} code{{color:#7dd3fc}}
+.cues{{margin:8px 0 0;padding-left:18px;color:#c6d0db}} .cues li{{margin:4px 0}}
 </style></head>
 <body><header><h1>{html.escape(str(plan.get("title", "Vlog Plan")))}</h1>
 <div class="meta">{len(plan.get("structure", []))} sections ·
-{float(plan.get("duration_sec", 0)):.1f}s · Plan <code>{plan_digest(episode.plan_path)[:12]}</code></div>
+{float(plan.get("duration_sec", 0)):.1f}s ·
+Day <code>{html.escape(str(plan.get("planning_day", "auto")))}</code> ·
+Plan <code>{plan_digest(episode.plan_path)[:12]}</code></div>
 <p>{html.escape(str(plan.get("editing_notes", "")))}</p>
-<p><strong>BGM:</strong> {html.escape(str(plan.get("bgm_suggestion", "")))}</p>
+<p><strong>BGM:</strong> {html.escape(bgm_text)}</p>
+{beds_html}
+<p><strong>SFX cues:</strong></p>
+{cues_html}
 <p>After reviewing, run <code>ve approve {html.escape(str(episode.root))}</code>.</p>
 </header><main>{cards}</main></body></html>"""
     output = dashboard / "index.html"

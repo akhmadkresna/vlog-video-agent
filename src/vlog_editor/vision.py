@@ -119,6 +119,7 @@ Return only compact JSON with this schema:
 {{
   "summary": "one sentence describing what happens across the clip",
   "subjects": ["people, places, objects"],
+  "setting": "vehicle|home|street|outdoor|mall|store|restaurant|hotel|transit|nature|attraction|other",
   "shot_type": "wide|full|medium|close|detail|mixed",
   "camera": "static|handheld|pan|tracking|mixed",
   "mood": "short mood",
@@ -126,9 +127,13 @@ Return only compact JSON with this schema:
   "motion": 0.0,
   "story_value": 0.0,
   "issues": ["blur, shake, obstruction, duplicate, poor exposure, or empty"],
-  "recommended_ranges": [{{"start": 0.0, "end": {duration:.2f}, "reason": "why"}}]
+  "recommended_ranges": [{{"start": 0.0, "end": 8.0, "reason": "why this exact moment"}}]
 }}
-Scores are 0..1. Do not invent speech. Keep ranges inside the clip.
+Scores are 0..1. Do not invent speech. Keep ranges inside the clip. Return 1-4
+strongest ranges in best-first order. Pure visual ranges should be 2-8 seconds;
+spoken ranges may be 5-30 seconds and must preserve a complete exchange. For
+clips longer than 60 seconds, sample moments across the clip and never recommend
+the entire clip or default every range to 0.
 """.strip()
         content, metrics = self.chat(prompt, images=frames)
         return parse_json_response(content), metrics

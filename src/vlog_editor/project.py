@@ -10,7 +10,8 @@ import yaml
 DEFAULT_CONFIG: dict[str, Any] = {
     "title": "My Vlog",
     "language": "auto",
-    "target_duration_sec": 180,
+    "target_duration_sec": "auto",
+    "setting_order": [],
     "style": "warm cinematic travel vlog",
     "output": {
         "width": 1920,
@@ -30,9 +31,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_output_tokens": 240,
         "keep_alive": "30m",
     },
+    "audio": {
+        "enabled": True,
+        "style": "funny_kids_indo",
+        "sfx_density": "medium",
+        "pack": "audio/pack.yaml",
+        "license_policy": "license_free_only",
+    },
     "bgm": {
         "file": None,
         "volume": 0.12,
+        # beds = intro / play / light B-roll / outro (default). full = whole edit.
+        "mode": "beds",
     },
 }
 
@@ -66,6 +76,10 @@ class Episode:
     def approval_path(self) -> Path:
         return self.work / "approval.json"
 
+    @property
+    def audio(self) -> Path:
+        return self.root / "audio"
+
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
@@ -89,12 +103,15 @@ def resolve_episode(path: str | Path) -> Episode:
 
 
 def create_episode(path: str | Path, *, force: bool = False) -> Episode:
+    from vlog_editor.audio_pack import ensure_audio_pack_layout
+
     root = Path(path).expanduser().resolve()
     if root.exists() and any(root.iterdir()) and not force:
         raise FileExistsError(f"Refusing to overwrite non-empty directory: {root}")
     root.mkdir(parents=True, exist_ok=True)
     for name in ("footage", "work", "output"):
         (root / name).mkdir(exist_ok=True)
+    ensure_audio_pack_layout(root)
     config_path = root / "project.yaml"
     if force or not config_path.exists():
         config_path.write_text(

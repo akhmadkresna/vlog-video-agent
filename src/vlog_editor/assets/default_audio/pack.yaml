@@ -1,0 +1,105 @@
+# Bundled Leika-style funny Indo-kids punctuation pack.
+# Classic SFX are CC0; meme SFX are user-provided local files under sfx/meme/
+# (not redistributed as CC0 — pack owner accepts use). BGM is Pixabay.
+# Planner rotates BGM across beds and maps meme roles with classic fallbacks.
+style: funny_kids_indo
+license_policy: license_free_only
+bgm_candidates:
+  - file: bgm/alex-morgan-kids-playground-giggles-parade-578468.mp3
+    license: pixabay
+    attribution: null
+    source_url: https://pixabay.com/
+    gain: 0.12
+  - file: bgm/maksymmalko-funny-kids-video-322163.mp3
+    license: pixabay
+    attribution: null
+    source_url: https://pixabay.com/
+    gain: 0.12
+  - file: bgm/sigmamusicart-kids-happy-background-music-401734.mp3
+    license: pixabay
+    attribution: null
+    source_url: https://pixabay.com/
+    gain: 0.12
+sfx:
+  boing:
+    gain: 0.50
+    files:
+      - file: sfx/boing/bsb_boing_cartoon_02.ogg
+        license: cc0
+        attribution: null
+        source_url: https://bigsoundbank.com/boing-cartoon-2-s2278.html
+      - file: sfx/boing/bsb_boing_cartoon_06.ogg
+        license: cc0
+        attribution: null
+        source_url: https://bigsoundbank.com/boing-cartoon-6-s2282.html
+  pop:
+    gain: 0.48
+    files: []
+  whoosh:
+    gain: 0.42
+    files: []
+  sparkle:
+    gain: 0.38
+    files:
+      - file: sfx/sparkle/kenney_pluck_001.ogg
+        license: cc0
+        attribution: null
+        source_url: https://kenney.nl/assets/interface-sounds
+      - file: sfx/sparkle/kenney_glass_001.ogg
+        license: cc0
+        attribution: null
+        source_url: https://kenney.nl/assets/interface-sounds
+      - file: sfx/sparkle/kenney_confirmation_002.ogg
+        license: cc0
+        attribution: null
+        source_url: https://kenney.nl/assets/interface-sounds
+  rimshot:
+    gain: 0.45
+    files: []
+  fail:
+    gain: 0.40
+    files: []
+  success:
+    gain: 0.42
+    files:
+      - file: sfx/success/kenney_confirmation_001.ogg
+        license: cc0
+        attribution: null
+        source_url: https://kenney.nl/assets/interface-sounds
+      - file: sfx/success/kenney_pluck_002.ogg
+        license: cc0
+        attribution: null
+        source_url: https://kenney.nl/assets/interface-sounds
+  meme:
+    gain: 0.55
+    files:
+      - file: sfx/meme/vine-boom-sound.mp3
+        role: boom
+        license: user_provided
+        attribution: null
+        source_url: null
+        gain: 0.58
+      - file: sfx/meme/bruh-meme.mp3
+        role: bruh
+        license: user_provided
+        attribution: null
+        source_url: null
+        gain: 0.52
+      - file: sfx/meme/fart.mp3
+        role: fart
+        license: user_provided
+        attribution: null
+        source_url: null
+        gain: 0.48
+      - file: sfx/meme/goofy-laugh-meme.mp3
+        role: goofy_laugh
+        license: user_provided
+        attribution: null
+        source_url: null
+        gain: 0.50
+      - file: sfx/meme/meme-click.mp3
+        role: click
+        license: user_provided
+        attribution: null
+        source_url: null
+        gain: 0.45

@@ -66,7 +66,7 @@ def analyze_episode(episode: Episode, *, force: bool = False) -> dict[str, Any]:
                 {
                     "model": vision_config["model"],
                     "frame_width": frame_width,
-                    "sampling": "v1",
+                    "sampling": "v4-capped-setting-focused-ranges",
                 },
             )
             cached = None if force else cache.get("vision", key)

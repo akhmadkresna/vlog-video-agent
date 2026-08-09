@@ -11,10 +11,10 @@ Use the `ve` CLI. Do not recreate its media logic in ad-hoc scripts.
 
 1. Run `ve doctor`.
 2. For a new episode, run `ve new <episode-path>`.
-3. Ask the user to place source videos in `footage/` and edit `project.yaml`.
+3. Ask the user to place source videos in `footage/`, optionally customize the seeded license-free `audio/` pack (or add BGM), and edit `project.yaml`.
 4. Run `ve analyze <episode>`. Preserve `work/cache/`; do not reanalyze unchanged media.
 5. Run `ve plan <episode>`.
-6. Run `ve preview <episode>` and wait for explicit user review.
+6. Run `ve preview <episode>` and wait for explicit user review of clips, SFX cues, and BGM.
 7. If the user requests plan changes, edit `work/edit_plan.json`, rerun `ve preview`, and wait again.
 8. Only after explicit approval, run `ve approve <episode>`, then `ve render <episode>`.
 9. Report `output/final.mp4` and `output/verification.json`.
@@ -27,6 +27,10 @@ Use the `ve` CLI. Do not recreate its media logic in ad-hoc scripts.
 - All AI inference stays local through Ollama at `127.0.0.1`.
 - Never bypass the plan-hash approval gate.
 - Never cut through a spoken word; retain validator corrections.
+- Keep plans chronological by capture time; prefer one primary capture day.
+- Prefer original footage over duplicate `Copy` files.
 - Do not run faster-whisper and Qwen concurrently on the 8 GB GPU.
-- Use user-supplied licensed BGM only. Do not generate or download music.
+- Use local audio packs only (`cc0`, `public_domain`, `youtube_audio_library`, `pixabay`, `original`, `user_provided`).
+- Prefer the bundled default pack (Leika-style Indo kids punctuation + Pixabay kids BGM + optional `sfx/meme/` roles). Do not generate synthetic SFX/BGM, scrape YouTube/CapCut audio, or auto-download at runtime. Meme files are opt-in local drops tagged `user_provided` with a `role` — never auto-ripped.
+- Review SFX cues and BGM in the dashboard before approval.
 - Keep cached analysis unless the footage, model, or settings changed.

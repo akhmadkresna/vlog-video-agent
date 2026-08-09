@@ -8,7 +8,7 @@ from vlog_editor.analysis import analyze_episode
 from vlog_editor.benchmark import run_benchmark
 from vlog_editor.dashboard import approve_plan, generate_dashboard
 from vlog_editor.doctor import print_report
-from vlog_editor.planner import create_plan
+from vlog_editor.planner import create_balanced_plan, create_plan
 from vlog_editor.project import DEFAULT_CONFIG, create_episode, resolve_episode
 from vlog_editor.render import render_episode
 
@@ -35,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = subparsers.add_parser("plan", help="Generate and validate a local edit plan")
     _episode_argument(plan)
+    plan.add_argument(
+        "--balanced",
+        action="store_true",
+        help="Use deterministic balanced selection without another LLM planning request",
+    )
 
     preview = subparsers.add_parser("preview", help="Generate the local review dashboard")
     _episode_argument(preview)
@@ -71,7 +76,10 @@ def dispatch(args: argparse.Namespace) -> int:
     if args.command == "analyze":
         analyze_episode(episode, force=args.force)
     elif args.command == "plan":
-        create_plan(episode)
+        if args.balanced:
+            create_balanced_plan(episode)
+        else:
+            create_plan(episode)
     elif args.command == "preview":
         generate_dashboard(episode, open_browser=not args.no_open)
     elif args.command == "approve":
