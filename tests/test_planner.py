@@ -8,6 +8,7 @@ from vlog_editor.planner import (
     is_playful_source,
     resolve_target_duration,
     select_excerpt,
+    select_required_settings,
     unique_clips,
 )
 from vlog_editor.validation import infer_setting, validate_and_fix_plan
@@ -311,6 +312,122 @@ def test_toy_store_cars_are_not_vehicle_setting() -> None:
         }
     }
     assert infer_setting(clip) == "store"
+
+
+def test_required_settings_span_earliest_and_latest() -> None:
+    settings = ["vehicle", "street", "outdoor", "restaurant", "attraction", "mall"]
+    first_seen = {name: index for index, name in enumerate(settings)}
+    pool = [
+        _clip(f"{name}.mov", 120 if name in {"outdoor", "mall"} else 40, setting=name)
+        for name in settings
+    ]
+    required = select_required_settings(
+        settings,
+        first_seen=first_seen,
+        pool=pool,
+        max_settings=4,
+    )
+    assert required[0] == "vehicle"
+    assert "mall" in required
+    assert len(required) == 4
+
+
+def test_balanced_plan_keeps_late_day_mall_coverage() -> None:
+    clips = []
+    # Long daytime outdoor play that previously ate the whole budget.
+    for index in range(6):
+        clips.append(
+            _clip(
+                f"day-outdoor-{index}.mov",
+                180,
+                transcript="anak bermain dan ketawa seru banget di outdoor",
+                setting="outdoor",
+                capture_time=f"2026-08-09T0{index + 1}:00:00.000000Z",
+            )
+        )
+        clips[-1]["visual"]["summary"] = "kids playing and fooling around outdoors"
+    clips.extend(
+        [
+            _clip(
+                "vehicle.mov",
+                40,
+                setting="vehicle",
+                capture_time="2026-08-09T00:30:00.000000Z",
+            ),
+            _clip(
+                "street.mov",
+                40,
+                setting="street",
+                capture_time="2026-08-09T00:45:00.000000Z",
+            ),
+            _clip(
+                "restaurant.mov",
+                40,
+                setting="restaurant",
+                capture_time="2026-08-09T08:00:00.000000Z",
+            ),
+            _clip(
+                "night-mall-arrive.mov",
+                80,
+                transcript="kita sampai di mall malam ini yuk belanja",
+                setting="mall",
+                capture_time="2026-08-09T19:30:00.000000Z",
+            ),
+            _clip(
+                "night-mall-donut.mov",
+                70,
+                transcript="makan donat di food court seru banget",
+                setting="mall",
+                capture_time="2026-08-09T19:50:00.000000Z",
+            ),
+            _clip(
+                "night-mall-leave.mov",
+                50,
+                transcript="pulang dari mall makasih dadah",
+                setting="mall",
+                capture_time="2026-08-09T20:10:00.000000Z",
+            ),
+        ]
+    )
+    clips[-3]["visual"]["summary"] = "family arrives at a shopping mall at night"
+    clips[-2]["visual"]["summary"] = "kids eat donuts at a mall food court"
+    clips[-1]["visual"]["summary"] = "family leaves the mall and waves goodbye"
+    analysis = {"clips": clips}
+    plan = build_balanced_fallback_plan(analysis, 360, title="Day with night mall")
+    fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=360)
+    assert errors == []
+    mall_clips = [
+        clip
+        for section in fixed["structure"]
+        for clip in section["clips"]
+        if "mall" in clip["file"]
+    ]
+    assert len(mall_clips) >= 2
+    selected_settings = {
+        infer_setting(
+            next(
+                item
+                for item in analysis["clips"]
+                if item["metadata"]["filename"] == clip["file"]
+            )
+        )
+        for section in fixed["structure"]
+        for clip in section["clips"]
+    }
+    assert "mall" in selected_settings
+
+
+def test_leaves_mall_driving_home_stays_mall() -> None:
+    clip = {
+        "visual": {
+            "setting": "outdoor|mall|vehicle",
+            "summary": (
+                "A family leaves a mall after dining, transitions to driving home "
+                "at night, and shares their experience with the camera."
+            ),
+        }
+    }
+    assert infer_setting(clip) == "mall"
 
 
 def test_balanced_plan_bookends_playful_open_and_cta_close() -> None:

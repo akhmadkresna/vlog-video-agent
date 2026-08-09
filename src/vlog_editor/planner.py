@@ -19,6 +19,10 @@ PLAY_MAX_SELECTION_SEC = 55.0
 MAX_PLAY_BEATS_PER_CLIP = 3
 OPEN_CTA_BEAT_SEC = 12.0
 MIN_OPEN_CTA_SEC = 8.0
+# Hold part of the middle budget for the last portion of the capture day so
+# evening settings (e.g. night mall) are not starved by long daytime play beats.
+LATE_DAY_FRACTION = 0.30
+LATE_DAY_RESERVE_RATIO = 0.22
 
 CTA_RE = re.compile(
     r"\b("
@@ -324,6 +328,65 @@ def select_primary_day_clips(clips: list[dict[str, Any]]) -> tuple[list[dict[str
     return by_day[primary_day] + undated, primary_day
 
 
+def select_required_settings(
+    settings_present: list[str],
+    *,
+    first_seen: dict[str, int],
+    pool: list[dict[str, Any]],
+    setting_order: list[str] | None = None,
+    max_settings: int = 4,
+) -> list[str]:
+    """Pick up to four settings spanning the day (earliest + latest + strongest)."""
+    if not settings_present:
+        return []
+    # Always reason in capture order; setting_order only breaks ties when filling.
+    ordered = sorted(
+        settings_present,
+        key=lambda setting: first_seen.get(setting, 10_000),
+    )
+    if len(ordered) <= max_settings:
+        return ordered
+
+    ranks = {
+        setting.strip().lower(): index
+        for index, setting in enumerate(setting_order or [])
+    }
+    duration_by_setting: dict[str, float] = defaultdict(float)
+    score_by_setting: dict[str, float] = defaultdict(float)
+    for clip in pool:
+        setting = infer_setting(clip)
+        if setting not in ordered:
+            continue
+        duration_by_setting[setting] += max(
+            0.0, float(clip.get("metadata", {}).get("duration", 0))
+        )
+        score_by_setting[setting] = max(score_by_setting[setting], _clip_score(clip))
+
+    chosen: list[str] = []
+    earliest = min(ordered, key=lambda setting: first_seen.get(setting, 10_000))
+    latest = max(ordered, key=lambda setting: first_seen.get(setting, -1))
+    for setting in (earliest, latest):
+        if setting not in chosen:
+            chosen.append(setting)
+
+    def fill_key(setting: str) -> tuple[Any, ...]:
+        return (
+            ranks.get(setting, len(ranks)),
+            -duration_by_setting.get(setting, 0.0),
+            -score_by_setting.get(setting, 0.0),
+            first_seen.get(setting, 10_000),
+        )
+
+    for setting in sorted(ordered, key=fill_key):
+        if len(chosen) >= max_settings:
+            break
+        if setting not in chosen:
+            chosen.append(setting)
+
+    chosen.sort(key=lambda setting: first_seen.get(setting, 10_000))
+    return chosen
+
+
 def _selection_from_source(
     source: dict[str, Any],
     *,
@@ -454,7 +517,13 @@ def build_balanced_fallback_plan(
             first_seen.get(setting, 10_000),
         )
     )
-    required_settings = settings_present[: min(4, len(settings_present))]
+    required_settings = select_required_settings(
+        settings_present,
+        first_seen=first_seen,
+        pool=pool,
+        setting_order=setting_order,
+        max_settings=4,
+    )
 
     desired_total = target_duration * 0.95
     # Validator caps a setting at 40% of *plan* duration — leave headroom vs undershoot.
@@ -503,6 +572,12 @@ def build_balanced_fallback_plan(
     # Hold budget for the eventual CTA close.
     cta_reserve = OPEN_CTA_BEAT_SEC
     middle_cap = max(0.0, desired_total - cta_reserve)
+    late_index = max(0, int(len(pool) * (1.0 - LATE_DAY_FRACTION)))
+    late_cutoff_time = ""
+    if pool and late_index < len(pool):
+        late_cutoff_time = _capture_time(pool[late_index]) or ""
+    late_reserve = middle_cap * LATE_DAY_RESERVE_RATIO if late_cutoff_time else 0.0
+    early_middle_cap = max(0.0, middle_cap - late_reserve)
 
     def _in_middle_window(source: dict[str, Any]) -> bool:
         capture = _capture_time(source) or "9999"
@@ -510,7 +585,18 @@ def build_balanced_fallback_plan(
             return False
         return True
 
-    def _try_add(source: dict[str, Any], *, allow_extra_beats: bool) -> None:
+    def _source_middle_cap(source: dict[str, Any]) -> float:
+        capture = _capture_time(source) or ""
+        if late_cutoff_time and capture >= late_cutoff_time:
+            return middle_cap
+        return early_middle_cap
+
+    def _try_add(
+        source: dict[str, Any],
+        *,
+        allow_extra_beats: bool,
+        respect_late_reserve: bool = True,
+    ) -> None:
         nonlocal total
         if not _in_middle_window(source):
             return
@@ -518,8 +604,11 @@ def build_balanced_fallback_plan(
         setting = infer_setting(source)
         if setting_duration[setting] >= setting_budget - 1e-6:
             return
+        source_cap = (
+            _source_middle_cap(source) if respect_late_reserve else middle_cap
+        )
         remaining_setting = setting_budget - setting_duration[setting]
-        remaining_total = middle_cap - total
+        remaining_total = source_cap - total
         budget = min(remaining_setting, remaining_total)
         if budget < MIN_SELECTION_SEC and float(source.get("metadata", {}).get("duration", 0)) >= MIN_SELECTION_SEC:
             return
@@ -535,10 +624,13 @@ def build_balanced_fallback_plan(
                 max(1, int(min(budget, source_duration) // 40)),
             )
         for _ in range(beats):
-            if total >= middle_cap or setting_duration[setting] >= setting_budget - 1e-6:
+            source_cap = (
+                _source_middle_cap(source) if respect_late_reserve else middle_cap
+            )
+            if total >= source_cap or setting_duration[setting] >= setting_budget - 1e-6:
                 break
             remaining_setting = setting_budget - setting_duration[setting]
-            remaining_total = middle_cap - total
+            remaining_total = source_cap - total
             budget = min(remaining_setting, remaining_total)
             selection = _selection_from_source(
                 source,
@@ -551,6 +643,7 @@ def build_balanced_fallback_plan(
             _commit(selection)
 
     # Reserve one chronological best clip for each required setting.
+    # Use the full middle cap here so diversity is not blocked by the late-day hold.
     for setting in required_settings:
         candidates = [
             clip
@@ -562,7 +655,13 @@ def build_balanced_fallback_plan(
         if not candidates:
             continue
         best = max(candidates, key=_clip_score)
-        _try_add(best, allow_extra_beats=is_playful_source(best))
+        # One beat each during diversity reserve; extra play beats come from
+        # chronological fill so a long daytime setting cannot crowd out night.
+        _try_add(
+            best,
+            allow_extra_beats=False,
+            respect_late_reserve=False,
+        )
 
     # Fill remaining budget in capture order so story time never jumps backward.
     for source in pool:
@@ -757,7 +856,8 @@ def build_balanced_fallback_plan(
         "bgm_suggestion": "",
         "editing_notes": (
             "Deterministic chronological balanced plan. Selections follow capture time, "
-            "deduplicate copies, keep setting diversity within one capture day, "
+            "deduplicate copies, keep setting diversity within one capture day "
+            "(including late-day settings such as evening mall), "
             "preserve complete fooling-around / play narration beats, and bookend with "
             "a playful open plus CTA close when footage allows."
             f"{day_note}"

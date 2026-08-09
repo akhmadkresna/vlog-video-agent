@@ -8,7 +8,16 @@ from typing import Any
 
 # Order matters: place/activity cues before generic transport words so
 # "Hot Wheels cars in a toy store aisle" stays store, not vehicle.
+# More specific places before generic home/outdoor/vehicle so
+# "leaves a mall … driving home" stays mall, not home.
 SETTING_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("store", ("store", "shop", "aisle", "market", "counter", "toy store")),
+    ("mall", ("mall", "shopping center", "shopping area")),
+    ("restaurant", ("restaurant", "cafe", "food court", "stall", "warung")),
+    ("transit", ("airport", "station", "terminal", "platform")),
+    ("nature", ("beach", "mountain", "forest", "lake", "river", "waterfall", "park")),
+    ("attraction", ("museum", "temple", "monument", "attraction", "landmark")),
+    ("street", ("street", "road", "sidewalk", "parking")),
     (
         "home",
         (
@@ -24,13 +33,6 @@ SETTING_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "playing on the floor",
         ),
     ),
-    ("store", ("store", "shop", "aisle", "market", "counter", "toy store")),
-    ("mall", ("mall", "shopping center", "shopping area")),
-    ("restaurant", ("restaurant", "cafe", "food court", "stall", "warung")),
-    ("transit", ("airport", "station", "terminal", "platform")),
-    ("nature", ("beach", "mountain", "forest", "lake", "river", "waterfall", "park")),
-    ("attraction", ("museum", "temple", "monument", "attraction", "landmark")),
-    ("street", ("street", "road", "sidewalk", "parking")),
     ("outdoor", ("outdoor", "outside", "garden", "courtyard")),
     # Word-boundary match only — "car" must not hit "cars" / "cart" / "cartoon".
     ("vehicle", ("car", "bus", "train", "plane", "vehicle", "backseat", "dashboard")),
@@ -57,6 +59,27 @@ def _keyword_in_text(normalized: str, keyword: str) -> bool:
     return re.search(pattern, normalized) is not None
 
 
+_DECLARED_SETTING_PRIORITY: tuple[str, ...] = (
+    "mall",
+    "store",
+    "restaurant",
+    "attraction",
+    "hotel",
+    "transit",
+    "nature",
+    "street",
+    "vehicle",
+    "home",
+    "outdoor",
+    "other",
+)
+
+
+def _declared_settings(raw: str) -> list[str]:
+    parts = [part.strip().lower() for part in re.split(r"[|,/]+", raw) if part.strip()]
+    return [part for part in parts if part in VALID_SETTINGS]
+
+
 def infer_setting(clip: dict[str, Any]) -> str:
     visual = clip.get("visual", {})
     text = " ".join(
@@ -66,8 +89,10 @@ def infer_setting(clip: dict[str, Any]) -> str:
         ]
     ).lower()
     normalized = re.sub(r"[^a-z0-9 ]+", " ", text)
-    declared = str(visual.get("setting", "")).strip().lower()
-    if declared in VALID_SETTINGS:
+    declared_options = _declared_settings(str(visual.get("setting", "")))
+    if declared_options:
+        priority = {name: index for index, name in enumerate(_DECLARED_SETTING_PRIORITY)}
+        declared = min(declared_options, key=lambda name: priority.get(name, len(priority)))
         # Soft correction: toy-store / aisle play is not a vehicle scene even if
         # the vision model said "vehicle" because of "cars" / "cart".
         storeish = any(
