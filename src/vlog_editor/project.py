@@ -54,9 +54,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "font_size": 48,
         "margin_v": 64,
     },
-    # kids_energy = open → kids peak → kids peak 2 → quiet/adult → goodbye
-    # chronological = capture-time order throughout
-    "story_arc": "kids_energy",
+    # scene_energy = scenes in capture order; best→better kids energy inside each scene
+    # kids_energy = open → global kids peak → peak 2 → quiet/adult → goodbye
+    # chronological = full capture-time order
+    "story_arc": "scene_energy",
 }
 
 

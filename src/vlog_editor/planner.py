@@ -710,18 +710,21 @@ def build_balanced_fallback_plan(
     *,
     title: str,
     setting_order: list[str] | None = None,
-    story_arc: str = "kids_energy",
+    story_arc: str = "scene_energy",
 ) -> dict[str, Any]:
     unique = unique_clips(analysis)
     pool, primary_day = select_primary_day_clips(unique)
     if not pool:
         raise ValueError("Cannot build a fallback plan without analyzed clips")
 
-    arc = str(story_arc or "kids_energy").strip().lower()
-    if arc in {"chrono", "chronological", "capture"}:
+    raw_arc = str(story_arc or "scene_energy").strip().lower()
+    if raw_arc in {"chrono", "chronological", "capture"}:
         arc = "chronological"
-    else:
+    elif raw_arc in {"kids_energy", "energy", "kids"}:
         arc = "kids_energy"
+    else:
+        # Default: scenes in capture order; best→better energy inside each scene.
+        arc = "scene_energy"
     pool.sort(
         key=lambda clip: (
             _capture_time(clip) or "9999",
@@ -914,8 +917,9 @@ def build_balanced_fallback_plan(
             if not before and filename in selected_files:
                 reserved += 1
 
-    # Fill remaining budget. kids_energy prefers peak kids activity first and caps
-    # low-activity / wait / adult filler; chronological walks capture order.
+    # Fill remaining budget.
+    # scene_energy / kids_energy prefer peak kids activity and cap low filler;
+    # chronological walks capture order.
     def _eligible_middle(source: dict[str, Any]) -> bool:
         if is_adult_meal_focus(source) and _clip_score(source) < 0.45:
             return False
@@ -932,9 +936,10 @@ def build_balanced_fallback_plan(
             and len(selected_ranges.get(filename, [])) < MAX_PLAY_BEATS_PER_CLIP
         )
 
-    if arc == "kids_energy":
+    def _add_peak_then_low(sources: list[dict[str, Any]]) -> None:
+        nonlocal total
         peak_pool = sorted(
-            [clip for clip in pool if is_peak_kids_source(clip)],
+            [clip for clip in sources if is_peak_kids_source(clip)],
             key=lambda clip: (
                 -kids_energy_score(clip),
                 _capture_time(clip) or "9999",
@@ -955,7 +960,7 @@ def build_balanced_fallback_plan(
             if item.get("_role") == "middle" and not item.get("_peak", True)
         )
         low_pool = sorted(
-            [clip for clip in pool if is_low_activity_source(clip)],
+            [clip for clip in sources if is_low_activity_source(clip)],
             key=lambda clip: (
                 _capture_time(clip) or "9999",
                 str(clip.get("metadata", {}).get("filename", "")),
@@ -969,6 +974,24 @@ def build_balanced_fallback_plan(
             before = total
             _try_add(source, allow_extra_beats=False)
             low_used += max(0.0, total - before)
+
+    if arc == "scene_energy":
+        # Walk scenes (settings) in first-seen capture order; inside each scene
+        # prefer best kids-energy sources before lower activity.
+        scenes: list[str] = []
+        seen_scene: set[str] = set()
+        for clip in pool:
+            setting = infer_setting(clip)
+            if setting not in seen_scene:
+                seen_scene.add(setting)
+                scenes.append(setting)
+        for setting in scenes:
+            if total >= middle_cap:
+                break
+            scene_sources = [clip for clip in pool if infer_setting(clip) == setting]
+            _add_peak_then_low(scene_sources)
+    elif arc == "kids_energy":
+        _add_peak_then_low(pool)
     else:
         for source in pool:
             if total >= middle_cap:
@@ -1034,7 +1057,7 @@ def build_balanced_fallback_plan(
             )
         )
     else:
-        # Keep open earliest / CTA latest; middle is reordered into energy bands later.
+        # Keep open earliest / CTA latest; middle is reordered by arc rules later.
         selected.sort(
             key=lambda clip: (
                 0 if clip.get("_role") == "open" else 1 if clip.get("_role") == "middle" else 2,
@@ -1274,6 +1297,35 @@ def build_balanced_fallback_plan(
                     low_items,
                 )
             )
+    elif arc == "scene_energy":
+        # Scenes stay in capture-time order; inside each scene rank best→better energy.
+        by_scene: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        scene_first_time: dict[str, str] = {}
+        for item in middle_items:
+            setting = str(item.get("_section_setting", "other"))
+            by_scene[setting].append(item)
+            capture = str(item.get("_capture_time") or "9999")
+            previous = scene_first_time.get(setting)
+            if previous is None or capture < previous:
+                scene_first_time[setting] = capture
+        for setting in sorted(
+            by_scene,
+            key=lambda name: (
+                scene_first_time.get(name, "9999"),
+                name,
+            ),
+        ):
+            clips = by_scene[setting]
+            clips.sort(
+                key=lambda item: (
+                    -float(item.get("_energy", 0) or 0),
+                    0 if item.get("_peak") else 1,
+                    str(item.get("_capture_time") or "9999"),
+                    float(item.get("start", 0)),
+                    str(item.get("file", "")),
+                )
+            )
+            structure.append(_storyboard_section(setting, clips))
     else:
         current_setting: str | None = None
         current_clips: list[dict[str, Any]] = []
@@ -1313,6 +1365,14 @@ def build_balanced_fallback_plan(
             "Priority 2: kid-interesting activity (play structures, animals, water play, "
             "treats, discovery, rides). Low-activity transit/adult beats are capped and "
             "placed before the CTA. Within each band, clips stay capture-time ordered."
+            f"{day_note}"
+        )
+    elif arc == "scene_energy":
+        editing_notes = (
+            "Scene-energy story arc: greeting/open → scenes in capture-time order → goodbye. "
+            "Inside each scene/setting, clips are ranked best→better by kids-on-camera energy "
+            "(play/animals/water/treats before wait/adult filler). Low-activity filler is capped. "
+            "Priority 1: children on camera. Priority 2: kid-interesting activity categories."
             f"{day_note}"
         )
     else:
@@ -1531,7 +1591,7 @@ def create_balanced_plan(episode: Episode) -> dict[str, Any]:
         target_duration,
         title=str(episode.config["title"]),
         setting_order=list(episode.config.get("setting_order", [])),
-        story_arc=str(episode.config.get("story_arc", "kids_energy")),
+        story_arc=str(episode.config.get("story_arc", "scene_energy")),
     )
     fixed, errors = validate_and_fix_plan(
         fallback,
@@ -1618,7 +1678,7 @@ Broken plan:
                 target_duration,
                 title=str(episode.config["title"]),
                 setting_order=list(episode.config.get("setting_order", [])),
-                story_arc=str(episode.config.get("story_arc", "kids_energy")),
+                story_arc=str(episode.config.get("story_arc", "scene_energy")),
             )
             fixed, errors = validate_and_fix_plan(
                 fallback,

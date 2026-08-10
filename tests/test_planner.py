@@ -206,7 +206,9 @@ def test_kids_energy_arc_orders_peak_before_quiet() -> None:
     bye["visual"]["summary"] = "child smiles and waves goodbye"
     bye["visual"]["subjects"] = ["child"]
     analysis = {"clips": [car, meal, play, animals, bye]}
-    plan = build_balanced_fallback_plan(analysis, 180, title="Energy day")
+    plan = build_balanced_fallback_plan(
+        analysis, 180, title="Energy day", story_arc="kids_energy"
+    )
     fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=180)
     errors = [error for error in errors if "too far from target" not in error]
     assert errors == []
@@ -224,6 +226,93 @@ def test_kids_energy_arc_orders_peak_before_quiet() -> None:
     assert play_i < quiet_i
     assert files[-1] == "bye.mov"
 
+
+def test_scene_energy_arc_keeps_scene_time_order_and_ranks_within_scene() -> None:
+    weak_outdoor = _clip(
+        "outdoor-weak.mov",
+        40,
+        transcript="jalan-jalan dulu",
+        setting="outdoor",
+        capture_time="2026-08-01T03:00:00.000000Z",
+    )
+    weak_outdoor["visual"]["summary"] = "adult walks through a resort path"
+    weak_outdoor["visual"]["subjects"] = ["man", "path"]
+    strong_outdoor = _clip(
+        "outdoor-strong.mov",
+        70,
+        transcript="anak bermain di playground ketawa",
+        setting="outdoor",
+        capture_time="2026-08-01T03:30:00.000000Z",
+    )
+    strong_outdoor["visual"]["summary"] = "kids playing on playground equipment"
+    strong_outdoor["visual"]["subjects"] = ["children", "playground"]
+    mid_outdoor = _clip(
+        "outdoor-mid.mov",
+        50,
+        transcript="adek lihat kelinci",
+        setting="outdoor",
+        capture_time="2026-08-01T03:45:00.000000Z",
+    )
+    mid_outdoor["visual"]["summary"] = "children watch rabbits at a mini zoo"
+    mid_outdoor["visual"]["subjects"] = ["children", "rabbits"]
+    mall = _clip(
+        "mall-treat.mov",
+        60,
+        transcript="makan donat seru banget",
+        setting="mall",
+        capture_time="2026-08-01T07:00:00.000000Z",
+    )
+    mall["visual"]["summary"] = "kids eat donuts at a mall food court"
+    mall["visual"]["subjects"] = ["children", "donuts"]
+    car = _clip(
+        "car-wait.mov",
+        40,
+        transcript="macet ya",
+        setting="vehicle",
+        capture_time="2026-08-01T01:00:00.000000Z",
+    )
+    car["visual"]["summary"] = "adult drives through traffic alone"
+    car["visual"]["subjects"] = ["man", "car"]
+    bye = _clip(
+        "bye.mov",
+        30,
+        transcript="dadah ya makasih see you",
+        setting="mall",
+        capture_time="2026-08-01T08:00:00.000000Z",
+    )
+    bye["visual"]["summary"] = "child smiles and waves goodbye"
+    bye["visual"]["subjects"] = ["child"]
+    analysis = {
+        "clips": [car, weak_outdoor, strong_outdoor, mid_outdoor, mall, bye]
+    }
+    plan = build_balanced_fallback_plan(analysis, 200, title="Scene day")
+    fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=200)
+    errors = [error for error in errors if "too far from target" not in error]
+    assert errors == []
+    assert fixed["story_arc"] == "scene_energy"
+    names = [section["section"] for section in fixed["structure"]]
+    assert names[-1] == "CTA close"
+    # Scene groups follow first-capture order: vehicle before outdoor before mall.
+    body = [
+        name
+        for name in names
+        if name not in {"Greeting open", "Playful open", "CTA close"}
+    ]
+    vehicle_i = next(i for i, name in enumerate(body) if name.lower().startswith("vehicle"))
+    outdoor_i = next(i for i, name in enumerate(body) if name.lower().startswith("outdoor"))
+    mall_i = next(i for i, name in enumerate(body) if name.lower().startswith("mall"))
+    assert vehicle_i < outdoor_i < mall_i
+    outdoor_section = next(
+        section
+        for section in fixed["structure"]
+        if str(section["section"]).lower().startswith("outdoor")
+    )
+    outdoor_files = [clip["file"] for clip in outdoor_section["clips"]]
+    assert outdoor_files[0] == "outdoor-strong.mov"
+    if "outdoor-mid.mov" in outdoor_files and "outdoor-weak.mov" in outdoor_files:
+        assert outdoor_files.index("outdoor-mid.mov") < outdoor_files.index(
+            "outdoor-weak.mov"
+        )
 def test_setting_order_cannot_override_capture_chronology() -> None:
     analysis = {
         "clips": [

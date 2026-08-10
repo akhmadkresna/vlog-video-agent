@@ -222,7 +222,7 @@ def validate_and_fix_plan(
                     )
             capture_time = str(source.get("metadata", {}).get("capture_time") or "")
             story_arc = str(fixed.get("story_arc") or "chronological").strip().lower()
-            enforce_chrono = story_arc not in {"kids_energy", "energy", "kids"}
+            enforce_chrono = story_arc in {"chronological", "chrono", "capture"}
             if (
                 enforce_chrono
                 and capture_time
