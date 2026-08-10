@@ -17,6 +17,13 @@ from vlog_editor.audio_plan import (
     text_has_children,
     text_looks_like_adult_meal,
 )
+from vlog_editor.kids_interest import (
+    WOW_SCORE_THRESHOLD,
+    best_wow_span,
+    score_window,
+    source_has_strong_wow,
+    source_wow_summary,
+)
 from vlog_editor.media import probe_video
 from vlog_editor.project import Episode, read_json, write_json
 from vlog_editor.validation import infer_setting, validate_and_fix_plan, validate_audio_plan
@@ -122,11 +129,13 @@ def source_kids_audience_categories(source: dict[str, Any]) -> list[str]:
 
 
 def allows_extra_play_beats(source: dict[str, Any]) -> bool:
-    """Multi-beats only for real kids-activity footage, never adult meal pads."""
+    """Multi-beats for playful kids activity or strong unused wow payoffs."""
     if is_adult_meal_focus(source):
         return False
     if float(source.get("metadata", {}).get("duration", 0) or 0) < 90:
         return False
+    if source_has_strong_wow(source):
+        return True
     if not is_playful_source(source):
         return False
     # Need at least one on-camera kids-audience activity hook.
@@ -159,7 +168,9 @@ def is_strong_greeting_source(source: dict[str, Any]) -> bool:
 
 
 def _max_selection_for_source(source: dict[str, Any]) -> float:
-    return PLAY_MAX_SELECTION_SEC if is_playful_source(source) else DEFAULT_MAX_SELECTION_SEC
+    if is_playful_source(source) or source_has_strong_wow(source):
+        return PLAY_MAX_SELECTION_SEC
+    return DEFAULT_MAX_SELECTION_SEC
 
 
 def _complete_exchange(
@@ -293,17 +304,45 @@ def select_excerpt(
                     end = min(source_duration, start + min(max_duration, MIN_OPEN_CTA_SEC))
             return round(start, 3), round(min(end, start + max_duration), 3)
 
+    # Prefer kids-interest payoff spans (animal wow, reactions) over walk-up setup.
+    wow_pick = best_wow_span(
+        source,
+        max_duration,
+        avoid=avoided,
+        min_score=WOW_SCORE_THRESHOLD,
+    )
+    if wow_pick is not None:
+        wow_start, wow_end, _moment = wow_pick
+        wow_start, wow_end = _complete_exchange(
+            segments,
+            start=wow_start,
+            max_duration=max_duration,
+            source_duration=source_duration,
+        )
+        if wow_end - wow_start >= 0.35 and not overlaps_avoided(wow_start, wow_end):
+            return round(wow_start, 3), round(min(wow_end, wow_start + max_duration), 3)
+
     ranges = source.get("visual", {}).get("recommended_ranges", [])
     clip_has_children = source_has_children(source)
-    # Prefer kid / kids-audience recommended ranges before generic focused ranges.
+    shot_type = str(source.get("visual", {}).get("shot_type", "") or "")
+
+    def _range_wow_key(item: dict[str, Any]) -> tuple[Any, ...]:
+        reason = str(item.get("reason", ""))
+        scored = score_window("", visual_reason=reason, shot_type=shot_type)
+        phase = str(scored.get("phase") or "payoff")
+        phase_rank = 0 if phase == "payoff" else 1 if phase == "logistics" else 2
+        return (
+            phase_rank,
+            -float(scored.get("score", 0) or 0),
+            0 if text_has_children(reason) else 1,
+            -kids_audience_interest(reason),
+            float(item.get("start", 0) or 0),
+        )
+
+    # Prefer payoff / high-wow recommended ranges before establishing walk-ups.
     ordered_ranges = sorted(
         (item for item in ranges if isinstance(item, dict)),
-        key=lambda item: (
-            0 if text_has_children(str(item.get("reason", ""))) else 1,
-            0 if kids_audience_interest(str(item.get("reason", ""))) > 0 else 1,
-            -kids_audience_interest(str(item.get("reason", ""))),
-            float(item.get("start", 0) or 0),
-        ),
+        key=_range_wow_key,
     )
     for item in ordered_ranges:
         try:
@@ -364,6 +403,10 @@ def select_excerpt(
         if clip_has_children and not text_has_children(text):
             children_bonus -= 2.0
         audience_bonus = 2.2 * kids_audience_interest(text)
+        wow = score_window(text, shot_type=shot_type)
+        wow_bonus = 5.0 * float(wow.get("score", 0) or 0)
+        if str(wow.get("phase") or "") == "setup":
+            wow_bonus -= 3.0
         greeting_bonus = 0.0
         if prefer_greeting and GREETING_RE.search(text):
             greeting_bonus = 6.0 if STRONG_GREETING_RE.search(text) else 3.5
@@ -378,6 +421,7 @@ def select_excerpt(
             + play_bonus
             + children_bonus
             + audience_bonus
+            + wow_bonus
             + greeting_bonus
         )
         candidates.append((score, start, end))
@@ -702,12 +746,14 @@ def _selection_from_source(
     hooks = source_kids_audience_categories(source)
     if hooks:
         note = f"{note} Kids-audience hooks: {', '.join(hooks)}.".strip()
+    wow = source_wow_summary(source, start=start, end=end)
     return {
         "file": str(metadata.get("filename", "")),
         "start": round(start, 3),
         "end": round(end, 3),
         "note": note,
         "subtitle": subtitle,
+        "wow": wow,
         "_capture_time": _capture_time(source),
         "_setting": infer_setting(source),
         "_score": _clip_score(source),

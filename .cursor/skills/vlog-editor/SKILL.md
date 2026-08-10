@@ -44,3 +44,5 @@ Use the `ve` CLI. Do not recreate its media logic in ad-hoc scripts.
 - Captions default on as a separate soft file `output/captions.srt` (not burned into
   `final.mp4`). Set `captions.burn_in: true` in an episode `project.yaml` to embed.
   Pin `language: id` for Indo ASR when needed.
+- Kids-interest wow scoring prefers payoff moments (animals, reactions) over setup
+  walk-ups. Review wow + per-frame narration on the storyboard after `ve preview`.
