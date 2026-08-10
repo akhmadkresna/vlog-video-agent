@@ -6,7 +6,7 @@ from typing import Any
 
 DEFAULT_CAPTIONS: dict[str, Any] = {
     "enabled": True,
-    "burn_in": True,
+    "burn_in": False,
     "max_chars": 42,
     "max_lines": 2,
     "max_cue_sec": 4.5,
@@ -332,21 +332,24 @@ def prepare_caption_files(
         min_cue_sec=float(config.get("min_cue_sec", 0.7)),
     )
     srt_path = episode.output / "captions.srt"
-    ass_path = episode.work / "captions.ass"
     write_srt(cues, srt_path)
-    write_ass(
-        cues,
-        ass_path,
-        width=int(episode.config["output"]["width"]),
-        height=int(episode.config["output"]["height"]),
-        font_name=str(config.get("font_name", "Arial")),
-        font_size=int(config.get("font_size", 48)),
-        margin_v=int(config.get("margin_v", 64)),
-    )
+    ass_path: Path | None = None
+    burn_in = bool(config.get("burn_in", False))
+    if burn_in:
+        ass_path = episode.work / "captions.ass"
+        write_ass(
+            cues,
+            ass_path,
+            width=int(episode.config["output"]["width"]),
+            height=int(episode.config["output"]["height"]),
+            font_name=str(config.get("font_name", "Arial")),
+            font_size=int(config.get("font_size", 48)),
+            margin_v=int(config.get("margin_v", 64)),
+        )
     return {
         "enabled": True,
-        "burn_in": bool(config.get("burn_in", True)),
+        "burn_in": burn_in,
         "cues": len(cues),
         "srt_path": str(srt_path),
-        "ass_path": str(ass_path),
+        "ass_path": str(ass_path) if ass_path is not None else None,
     }

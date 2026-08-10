@@ -45,8 +45,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "mode": "beds",
     },
     "captions": {
+        # Soft sidecar SRT by default; set burn_in true per episode to embed on video.
         "enabled": True,
-        "burn_in": True,
+        "burn_in": False,
         "max_chars": 42,
         "max_lines": 2,
         "max_cue_sec": 4.5,

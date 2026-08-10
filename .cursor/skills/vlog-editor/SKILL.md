@@ -41,5 +41,6 @@ Use the `ve` CLI. Do not recreate its media logic in ad-hoc scripts.
 - Prefer the bundled default pack (Leika-style Indo kids punctuation + Pixabay kids BGM + optional `sfx/meme/` roles). Do not generate synthetic SFX/BGM, scrape YouTube/CapCut audio, or auto-download at runtime. Meme files are opt-in local drops tagged `user_provided` with a `role` — never auto-ripped.
 - Review SFX cues and BGM in the dashboard before approval.
 - Keep cached analysis unless the footage, model, or settings changed.
-- Captions default on: soft `output/captions.srt` plus burn-in from ASR word timings
-  (`captions.enabled` / `captions.burn_in` in `project.yaml`). Pin `language: id` for Indo.
+- Captions default on as a separate soft file `output/captions.srt` (not burned into
+  `final.mp4`). Set `captions.burn_in: true` in an episode `project.yaml` to embed.
+  Pin `language: id` for Indo ASR when needed.
