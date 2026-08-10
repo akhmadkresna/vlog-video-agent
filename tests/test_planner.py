@@ -295,6 +295,115 @@ def test_kids_audience_categories_are_activity_types_not_place_hardcodes() -> No
     assert "animals" in kids_audience_categories("kids point at fish in the pond")
 
 
+def test_adult_meal_focus_is_demoted_vs_playground() -> None:
+    from vlog_editor.planner import (
+        _clip_score,
+        allows_extra_play_beats,
+        is_adult_meal_focus,
+        source_has_children,
+        source_kids_audience_categories,
+    )
+
+    meal = _clip(
+        "meal.mov",
+        400,
+        transcript="Mbak Merah bersama adek, Mami makan dulu, tadi udah renang",
+        quality=0.8,
+        story_value=0.8,
+    )
+    meal["visual"]["summary"] = (
+        "A woman eats nasi goreng at an outdoor restaurant while interacting with her phone"
+    )
+    meal["visual"]["subjects"] = ["woman", "plate of food", "glass of drink", "phone"]
+
+    playground = _clip(
+        "play.mov",
+        120,
+        transcript="adek main ayunan",
+        quality=0.6,
+        story_value=0.6,
+    )
+    playground["visual"]["summary"] = "Children play on a colorful playground structure"
+    playground["visual"]["subjects"] = ["children", "playground"]
+
+    assert is_adult_meal_focus(meal)
+    assert not source_has_children(meal)
+    assert source_kids_audience_categories(meal) == []
+    assert not allows_extra_play_beats(meal)
+    assert source_has_children(playground)
+    assert "play_structure" in source_kids_audience_categories(playground)
+    assert allows_extra_play_beats(playground)
+    assert _clip_score(playground) > _clip_score(meal)
+
+
+def test_balanced_plan_avoids_long_adult_meal_stretch() -> None:
+    clips = [
+        _clip(
+            "meal.mov",
+            400,
+            transcript="Mbak Merah adek Mami makan nasi goreng tadi renang",
+            quality=0.85,
+            story_value=0.85,
+            setting="outdoor",
+            capture_time="2026-08-09T02:20:00.000000Z",
+        ),
+        _clip(
+            "playground-a.mov",
+            120,
+            transcript="adek main slide",
+            setting="outdoor",
+            capture_time="2026-08-09T03:30:00.000000Z",
+        ),
+        _clip(
+            "playground-b.mov",
+            120,
+            transcript="anak bermain di playground",
+            setting="outdoor",
+            capture_time="2026-08-09T03:40:00.000000Z",
+        ),
+        _clip(
+            "vehicle.mov",
+            40,
+            setting="vehicle",
+            capture_time="2026-08-09T01:00:00.000000Z",
+        ),
+        _clip(
+            "street.mov",
+            40,
+            setting="street",
+            capture_time="2026-08-09T01:10:00.000000Z",
+        ),
+        _clip(
+            "store.mov",
+            40,
+            setting="store",
+            capture_time="2026-08-09T04:00:00.000000Z",
+        ),
+    ]
+    clips[0]["visual"]["summary"] = "A woman eats nasi goreng while using her phone"
+    clips[0]["visual"]["subjects"] = ["woman", "plate of food", "phone"]
+    clips[1]["visual"]["summary"] = "Children play on playground slides"
+    clips[1]["visual"]["subjects"] = ["children", "playground"]
+    clips[2]["visual"]["summary"] = "Kids climb playground tunnels"
+    clips[2]["visual"]["subjects"] = ["children", "playground"]
+
+    plan = build_balanced_fallback_plan({"clips": clips}, 240, title="No adult meal pad")
+    meal_beats = [
+        clip
+        for section in plan["structure"]
+        for clip in section["clips"]
+        if clip["file"] == "meal.mov"
+    ]
+    play_beats = [
+        clip
+        for section in plan["structure"]
+        for clip in section["clips"]
+        if "playground" in clip["file"]
+    ]
+    assert len(meal_beats) <= 1
+    assert len(play_beats) >= 1
+
+
 def test_clip_score_prefers_children_over_scenic_adult_clip() -> None:
     from vlog_editor.planner import _clip_score, source_has_children
 

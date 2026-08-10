@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from vlog_editor.audio_plan import (
-    CHILDREN_RE,
     CUTE_RE,
     LAUGH_RE,
     PLAY_RE,
@@ -16,6 +15,7 @@ from vlog_editor.audio_plan import (
     kids_audience_interest,
     plan_audio_cues,
     text_has_children,
+    text_looks_like_adult_meal,
 )
 from vlog_editor.media import probe_video
 from vlog_editor.project import Episode, read_json, write_json
@@ -50,28 +50,67 @@ def _source_text(source: dict[str, Any]) -> str:
     return f"{audio.get('text', '')} {visual.get('summary', '')} {subjects}"
 
 
+def _visual_text(source: dict[str, Any]) -> str:
+    """On-camera evidence only — subjects + summary (ignore past-tense ASR chatter)."""
+    visual = source.get("visual", {})
+    subjects = " ".join(str(item) for item in visual.get("subjects", []) or [])
+    return f"{visual.get('summary', '')} {subjects}"
+
+
+def is_adult_meal_focus(source: dict[str, Any]) -> bool:
+    """Adult eating/phone B-roll with no children visible in the vision summary/subjects."""
+    return text_looks_like_adult_meal(_visual_text(source))
+
+
 def is_playful_source(source: dict[str, Any]) -> bool:
     """Kids fooling-around / play / laugh — keep these scenes, don't starve them."""
+    if is_adult_meal_focus(source):
+        return False
     text = _source_text(source)
-    if PLAY_RE.search(text) or LAUGH_RE.search(text):
+    visual = _visual_text(source)
+    # Prefer visual play cues; ASR-only name drops on adult meals are not playful.
+    if PLAY_RE.search(visual) or LAUGH_RE.search(text):
         return True
-    if CUTE_RE.search(text) and float(source.get("visual", {}).get("story_value", 0) or 0) >= 0.55:
+    if PLAY_RE.search(text) and text_has_children(visual):
+        return True
+    if CUTE_RE.search(visual) and float(source.get("visual", {}).get("story_value", 0) or 0) >= 0.55:
         return True
     return False
 
 
 def source_has_children(source: dict[str, Any]) -> bool:
-    """True when subjects/summary/transcript point at children on camera or speaking."""
-    return text_has_children(_source_text(source))
+    """Children on camera (subjects/summary). ASR name-drops alone do not count."""
+    return text_has_children(_visual_text(source))
 
 
 def source_kids_audience_interest(source: dict[str, Any]) -> float:
-    """Secondary priority: activity types fun for a kids audience (not place hardcodes)."""
-    return kids_audience_interest(_source_text(source))
+    """Secondary priority from on-camera activity types (not ASR talking about earlier swim)."""
+    if is_adult_meal_focus(source):
+        return 0.0
+    visual = _visual_text(source)
+    score = kids_audience_interest(visual)
+    # Generic on-camera kids play still counts even without a named play structure.
+    if score <= 0 and source_has_children(source) and PLAY_RE.search(visual):
+        return 0.34
+    return score
 
 
 def source_kids_audience_categories(source: dict[str, Any]) -> list[str]:
-    return kids_audience_categories(_source_text(source))
+    if is_adult_meal_focus(source):
+        return []
+    return kids_audience_categories(_visual_text(source))
+
+
+def allows_extra_play_beats(source: dict[str, Any]) -> bool:
+    """Multi-beats only for real kids-activity footage, never adult meal pads."""
+    if is_adult_meal_focus(source):
+        return False
+    if float(source.get("metadata", {}).get("duration", 0) or 0) < 90:
+        return False
+    if not is_playful_source(source):
+        return False
+    # Need at least one on-camera kids-audience activity hook.
+    return source_kids_audience_interest(source) >= 0.34
 
 
 def is_cta_source(source: dict[str, Any]) -> bool:
@@ -313,6 +352,9 @@ def _clip_score(clip: dict[str, Any]) -> float:
     audience = source_kids_audience_interest(clip)
     if audience > 0:
         score = min(1.0, score + 0.10 * audience)
+    # Adult meal / phone B-roll must not crowd out playground footage.
+    if is_adult_meal_focus(clip):
+        score = min(score, 0.38)
     return score
 
 
@@ -668,8 +710,7 @@ def build_balanced_fallback_plan(
         beats = 1
         if (
             allow_extra_beats
-            and is_playful_source(source)
-            and source_duration >= 90
+            and allows_extra_play_beats(source)
         ):
             beats = min(
                 MAX_PLAY_BEATS_PER_CLIP,
@@ -737,10 +778,11 @@ def build_balanced_fallback_plan(
         filename = str(source.get("metadata", {}).get("filename", ""))
         # Long playful sources may already have one beat; still allow more beats.
         if filename in selected_files and not (
-            is_playful_source(source)
-            and float(source.get("metadata", {}).get("duration", 0)) >= 90
+            allows_extra_play_beats(source)
             and len(selected_ranges.get(filename, [])) < MAX_PLAY_BEATS_PER_CLIP
         ):
+            continue
+        if is_adult_meal_focus(source) and _clip_score(source) < 0.45:
             continue
         if source_has_children(source):
             if _clip_score(source) < 0.28:
@@ -1046,11 +1088,13 @@ Rules:
 - Use a hook, development, highlight, and emotional close; 4-10 sections total.
 - Prefer landscape, high quality, motion and story value. Skip poor/redundant footage.
 - Storyboard for a kids audience:
-  1) Primary: children visible or speaking (anak/adek/child/kid cues).
-  2) Secondary: kid-interesting ACTIVITY CATEGORIES — play structures, animals/creatures,
-     water play, treats/sweets, discovery/wonder reactions, fun rides. Prefer these over
-     flat adult talk or empty scenery. Do NOT hardcode specific places (no "must include
-     fish pond"); pick whatever kid-interesting activity the analysis actually shows.
+  1) Primary: children visible on camera (subjects/summary), not ASR name-drops alone.
+  2) Secondary: kid-interesting ACTIVITY CATEGORIES from what is on camera — play
+     structures, animals/creatures, water play, treats/sweets, discovery/wonder, rides.
+     Prefer these over flat adult talk, adult-only eating/phone B-roll, or empty scenery.
+     Do NOT hardcode specific places; pick whatever kid-interesting activity analysis shows.
+  3) Do not spend long multi-beat stretches on adult meal scenes when unused playground /
+     play / animal footage still exists later in the day.
 - Name sections like a kids storyboard when helpful (e.g. "Outdoor — Kids water play"),
   still keeping capture chronology.
 - Pure visual shots usually last 2-6 seconds. Preserve complete useful speech.

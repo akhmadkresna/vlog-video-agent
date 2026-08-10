@@ -135,6 +135,25 @@ def kids_audience_interest(text: str) -> float:
     return min(1.0, 0.34 * len(categories) + (0.12 if PLAY_RE.search(text or "") else 0.0))
 
 
+# Adult-dominated meal / phone B-roll (visual cues). Not a ban on family meals —
+# those still count when children appear in subjects/summary.
+ADULT_MEAL_RE = re.compile(
+    r"\b("
+    r"eats|eating|makan|nasi|goreng|plate|food|menu|phone|"
+    r"drink|glass|coffee|kopi|sendok|fork|spoon"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def text_looks_like_adult_meal(text: str) -> bool:
+    blob = text or ""
+    if not ADULT_MEAL_RE.search(blob):
+        return False
+    # If children are described on camera, treat as family meal — not adult-only.
+    return not text_has_children(blob)
+
+
 MAX_MEME_PER_TOTAL = 14.0
 
 INTRO_SEC = 8.0
