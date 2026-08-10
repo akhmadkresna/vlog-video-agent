@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from vlog_editor.captions import ffmpeg_subtitles_path, prepare_caption_files
 from vlog_editor.dashboard import require_approval
 from vlog_editor.media import probe_video, run
 from vlog_editor.project import Episode, read_json, write_json
@@ -28,6 +29,8 @@ def build_render_command(
     episode: Episode,
     plan: dict[str, Any],
     output: Path,
+    *,
+    burn_in_captions: Path | None = None,
 ) -> tuple[list[str], str]:
     width = int(episode.config["output"]["width"])
     height = int(episode.config["output"]["height"])
@@ -116,6 +119,14 @@ def build_render_command(
         "".join(concat_inputs)
         + f"concat=n={len(selections)}:v=1:a=1[vcat][acat]"
     )
+
+    video_map = "[vcat]"
+    if burn_in_captions is not None:
+        if not burn_in_captions.is_file():
+            raise FileNotFoundError(f"Caption file missing: {burn_in_captions}")
+        escaped = ffmpeg_subtitles_path(burn_in_captions)
+        filters.append(f"[vcat]ass='{escaped}'[vcap]")
+        video_map = "[vcap]"
 
     dialogue_label = "[acat]"
     next_input = len(selections)
@@ -212,7 +223,7 @@ def build_render_command(
         "-filter_complex_script",
         str(episode.work / "render_filter.txt"),
         "-map",
-        "[vcat]",
+        video_map,
         "-map",
         audio_map,
         "-c:v",
@@ -301,7 +312,28 @@ def render_episode(episode: Episode) -> Path:
         raise ValueError("\n".join(audio_errors))
     episode.output.mkdir(parents=True, exist_ok=True)
     output = episode.output / "final.mp4"
-    command, filter_script = build_render_command(episode, plan, output)
+
+    burn_in_path: Path | None = None
+    caption_meta: dict[str, Any] = {"enabled": False, "cues": 0}
+    if episode.analysis_path.is_file():
+        analysis = read_json(episode.analysis_path)
+        caption_meta = prepare_caption_files(episode, plan, analysis)
+        if caption_meta.get("enabled") and caption_meta.get("burn_in"):
+            burn_in_path = Path(str(caption_meta["ass_path"]))
+        if caption_meta.get("enabled"):
+            print(
+                f"Captions: {caption_meta.get('cues', 0)} cues"
+                f"{' (burn-in)' if burn_in_path else ' (soft SRT only)'}"
+            )
+    elif bool((episode.config.get("captions") or {}).get("enabled", True)):
+        print("Captions skipped: missing clip analysis (run `ve analyze` first).")
+
+    command, filter_script = build_render_command(
+        episode,
+        plan,
+        output,
+        burn_in_captions=burn_in_path,
+    )
     filter_path = episode.work / "render_filter.txt"
     filter_path.write_text(filter_script, encoding="utf-8")
     print(f"Rendering {float(plan['duration_sec']):.1f}s with {command[command.index('-c:v') + 1]}...")
@@ -311,6 +343,14 @@ def render_episode(episode: Episode) -> Path:
         float(plan["duration_sec"]),
         int(episode.config["output"]["fps"]),
     )
+    report["captions"] = {
+        "enabled": bool(caption_meta.get("enabled")),
+        "burn_in": bool(burn_in_path),
+        "cues": int(caption_meta.get("cues") or 0),
+        "srt": caption_meta.get("srt_path"),
+    }
     write_json(episode.output / "verification.json", report)
     print(f"Wrote {output}")
+    if caption_meta.get("srt_path"):
+        print(f"Wrote {caption_meta['srt_path']}")
     return output

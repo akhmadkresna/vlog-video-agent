@@ -44,6 +44,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # beds = intro / play / light B-roll / outro (default). full = whole edit.
         "mode": "beds",
     },
+    "captions": {
+        "enabled": True,
+        "burn_in": True,
+        "max_chars": 42,
+        "max_lines": 2,
+        "max_cue_sec": 4.5,
+        "font_name": "Arial",
+        "font_size": 48,
+        "margin_v": 64,
+    },
 }
 
 
