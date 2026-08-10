@@ -54,6 +54,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "font_size": 48,
         "margin_v": 64,
     },
+    # kids_energy = open → kids peak → kids peak 2 → quiet/adult → goodbye
+    # chronological = capture-time order throughout
+    "story_arc": "kids_energy",
 }
 
 

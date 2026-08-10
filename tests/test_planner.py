@@ -136,7 +136,9 @@ def test_balanced_fallback_follows_capture_chronology_and_primary_day() -> None:
             ),
         ]
     }
-    plan = build_balanced_fallback_plan(analysis, 120, title="Trip")
+    plan = build_balanced_fallback_plan(
+        analysis, 120, title="Trip", story_arc="chronological"
+    )
     fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=120)
     assert errors == []
     assert fixed["planning_day"] == "2026-08-01"
@@ -156,6 +158,71 @@ def test_balanced_fallback_follows_capture_chronology_and_primary_day() -> None:
     )
     assert fixed["structure"][0]["section"].startswith("Home")
 
+
+def test_kids_energy_arc_orders_peak_before_quiet() -> None:
+    play = _clip(
+        "playground.mov",
+        80,
+        transcript="anak bermain di playground ketawa seru",
+        setting="outdoor",
+        capture_time="2026-08-01T04:00:00.000000Z",
+    )
+    play["visual"]["summary"] = "kids playing on playground equipment"
+    play["visual"]["subjects"] = ["children", "playground"]
+    animals = _clip(
+        "animals.mov",
+        70,
+        transcript="lihat kelinci lucu adek",
+        setting="outdoor",
+        capture_time="2026-08-01T05:00:00.000000Z",
+    )
+    animals["visual"]["summary"] = "children watch rabbits at a mini zoo"
+    animals["visual"]["subjects"] = ["children", "rabbits"]
+    car = _clip(
+        "car-wait.mov",
+        40,
+        transcript="macet ya",
+        setting="vehicle",
+        capture_time="2026-08-01T01:00:00.000000Z",
+    )
+    car["visual"]["summary"] = "adult drives through traffic alone"
+    car["visual"]["subjects"] = ["man", "car"]
+    meal = _clip(
+        "adult-meal.mov",
+        50,
+        transcript="nasi goreng enak",
+        setting="restaurant",
+        capture_time="2026-08-01T02:00:00.000000Z",
+    )
+    meal["visual"]["summary"] = "woman eats nasi goreng while looking at her phone"
+    meal["visual"]["subjects"] = ["woman", "plate of food", "phone"]
+    bye = _clip(
+        "bye.mov",
+        30,
+        transcript="dadah ya makasih see you",
+        setting="outdoor",
+        capture_time="2026-08-01T08:00:00.000000Z",
+    )
+    bye["visual"]["summary"] = "child smiles and waves goodbye"
+    bye["visual"]["subjects"] = ["child"]
+    analysis = {"clips": [car, meal, play, animals, bye]}
+    plan = build_balanced_fallback_plan(analysis, 180, title="Energy day")
+    fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=180)
+    errors = [error for error in errors if "too far from target" not in error]
+    assert errors == []
+    assert fixed["story_arc"] == "kids_energy"
+    names = [section["section"] for section in fixed["structure"]]
+    assert any(name.startswith("Kids peak") for name in names)
+    assert any(name.startswith("Quiet / adult") for name in names)
+    assert names[-1] == "CTA close"
+    # Peak kids files should appear before quiet/adult files in the edit.
+    files = [clip["file"] for section in fixed["structure"] for clip in section["clips"]]
+    play_i = min(i for i, name in enumerate(files) if name in {"playground.mov", "animals.mov"})
+    quiet_files = [name for name in files if name in {"car-wait.mov", "adult-meal.mov"}]
+    assert quiet_files, files
+    quiet_i = min(i for i, name in enumerate(files) if name in {"car-wait.mov", "adult-meal.mov"})
+    assert play_i < quiet_i
+    assert files[-1] == "bye.mov"
 
 def test_setting_order_cannot_override_capture_chronology() -> None:
     analysis = {
@@ -191,6 +258,7 @@ def test_setting_order_cannot_override_capture_chronology() -> None:
         120,
         title="Trip",
         setting_order=["outdoor", "store", "vehicle", "home"],
+        story_arc="chronological",
     )
     assert plan["structure"][0]["section"].startswith("Home") or plan[
         "structure"
@@ -681,7 +749,9 @@ def test_balanced_plan_bookends_playful_open_and_cta_close() -> None:
     }
     analysis["clips"][0]["visual"]["summary"] = "kids playing and fooling around"
     analysis["clips"][-1]["visual"]["summary"] = "child smiles and waves goodbye"
-    plan = build_balanced_fallback_plan(analysis, 150, title="Play day")
+    plan = build_balanced_fallback_plan(
+        analysis, 150, title="Play day", story_arc="chronological"
+    )
     fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=150)
     assert errors == []
     assert fixed["structure"][0]["section"] == "Playful open"

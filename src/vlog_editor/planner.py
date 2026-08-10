@@ -437,6 +437,31 @@ def _clip_score(clip: dict[str, Any]) -> float:
     return score
 
 
+def kids_energy_score(source: dict[str, Any]) -> float:
+    """0-1 score for kids-on-camera activity strength (used by kids_energy story arc)."""
+    if is_adult_meal_focus(source):
+        return 0.05
+    score = 0.0
+    if source_has_children(source):
+        score += 0.42
+    score += 0.55 * source_kids_audience_interest(source)
+    if is_playful_source(source):
+        score += 0.22
+    setting = infer_setting(source)
+    # Transit / wait B-roll stays low unless kids activity is clearly present.
+    if setting in {"vehicle", "street"} and score < 0.55:
+        score *= 0.4
+    return round(min(1.0, score), 4)
+
+
+def is_peak_kids_source(source: dict[str, Any]) -> bool:
+    return kids_energy_score(source) >= 0.34
+
+
+def is_low_activity_source(source: dict[str, Any]) -> bool:
+    return not is_peak_kids_source(source)
+
+
 def _capture_time(clip: dict[str, Any]) -> str:
     return str(clip.get("metadata", {}).get("capture_time") or "")
 
@@ -608,6 +633,8 @@ def _selection_from_source(
         "_score": _clip_score(source),
         "_playful": is_playful_source(source),
         "_greeting": is_greeting_source(source),
+        "_energy": kids_energy_score(source),
+        "_peak": is_peak_kids_source(source),
         "_kids_hooks": hooks,
     }
 
@@ -683,12 +710,18 @@ def build_balanced_fallback_plan(
     *,
     title: str,
     setting_order: list[str] | None = None,
+    story_arc: str = "kids_energy",
 ) -> dict[str, Any]:
     unique = unique_clips(analysis)
     pool, primary_day = select_primary_day_clips(unique)
     if not pool:
         raise ValueError("Cannot build a fallback plan without analyzed clips")
 
+    arc = str(story_arc or "kids_energy").strip().lower()
+    if arc in {"chrono", "chronological", "capture"}:
+        arc = "chronological"
+    else:
+        arc = "kids_energy"
     pool.sort(
         key=lambda clip: (
             _capture_time(clip) or "9999",
@@ -881,25 +914,68 @@ def build_balanced_fallback_plan(
             if not before and filename in selected_files:
                 reserved += 1
 
-    # Fill remaining budget in capture order so story time never jumps backward.
-    for source in pool:
-        if total >= middle_cap:
-            break
+    # Fill remaining budget. kids_energy prefers peak kids activity first and caps
+    # low-activity / wait / adult filler; chronological walks capture order.
+    def _eligible_middle(source: dict[str, Any]) -> bool:
+        if is_adult_meal_focus(source) and _clip_score(source) < 0.45:
+            return False
+        if source_has_children(source):
+            return _clip_score(source) >= 0.28
+        return _clip_score(source) >= 0.35
+
+    def _can_add_more_beats(source: dict[str, Any]) -> bool:
         filename = str(source.get("metadata", {}).get("filename", ""))
-        # Long playful sources may already have one beat; still allow more beats.
-        if filename in selected_files and not (
+        if filename not in selected_files:
+            return True
+        return (
             allows_extra_play_beats(source)
             and len(selected_ranges.get(filename, [])) < MAX_PLAY_BEATS_PER_CLIP
-        ):
-            continue
-        if is_adult_meal_focus(source) and _clip_score(source) < 0.45:
-            continue
-        if source_has_children(source):
-            if _clip_score(source) < 0.28:
+        )
+
+    if arc == "kids_energy":
+        peak_pool = sorted(
+            [clip for clip in pool if is_peak_kids_source(clip)],
+            key=lambda clip: (
+                -kids_energy_score(clip),
+                _capture_time(clip) or "9999",
+                str(clip.get("metadata", {}).get("filename", "")),
+            ),
+        )
+        for source in peak_pool:
+            if total >= middle_cap:
+                break
+            if not _eligible_middle(source) or not _can_add_more_beats(source):
                 continue
-        elif _clip_score(source) < 0.35:
-            continue
-        _try_add(source, allow_extra_beats=True)
+            _try_add(source, allow_extra_beats=True)
+
+        low_cap = middle_cap * 0.24
+        low_used = sum(
+            float(item["end"]) - float(item["start"])
+            for item in selected
+            if item.get("_role") == "middle" and not item.get("_peak", True)
+        )
+        low_pool = sorted(
+            [clip for clip in pool if is_low_activity_source(clip)],
+            key=lambda clip: (
+                _capture_time(clip) or "9999",
+                str(clip.get("metadata", {}).get("filename", "")),
+            ),
+        )
+        for source in low_pool:
+            if total >= middle_cap or low_used >= low_cap - 1e-6:
+                break
+            if not _eligible_middle(source) or not _can_add_more_beats(source):
+                continue
+            before = total
+            _try_add(source, allow_extra_beats=False)
+            low_used += max(0.0, total - before)
+    else:
+        for source in pool:
+            if total >= middle_cap:
+                break
+            if not _eligible_middle(source) or not _can_add_more_beats(source):
+                continue
+            _try_add(source, allow_extra_beats=True)
 
     # CTA close after the body — must be last in capture order.
     last_body_time = ""
@@ -949,13 +1025,24 @@ def build_balanced_fallback_plan(
             item["note"] = f"{note} CTA close b-roll.".strip()
             cta_selection = item
 
-    selected.sort(
-        key=lambda clip: (
-            str(clip.get("_capture_time") or "9999"),
-            float(clip.get("start", 0)),
-            str(clip.get("file", "")),
+    if arc == "chronological":
+        selected.sort(
+            key=lambda clip: (
+                str(clip.get("_capture_time") or "9999"),
+                float(clip.get("start", 0)),
+                str(clip.get("file", "")),
+            )
         )
-    )
+    else:
+        # Keep open earliest / CTA latest; middle is reordered into energy bands later.
+        selected.sort(
+            key=lambda clip: (
+                0 if clip.get("_role") == "open" else 1 if clip.get("_role") == "middle" else 2,
+                str(clip.get("_capture_time") or "9999"),
+                float(clip.get("start", 0)),
+                str(clip.get("file", "")),
+            )
+        )
 
     # Keep setting share under the validator's 40% of *plan* duration (not target).
     # Prefer dropping middle beats; never drop reserved open/CTA bookends.
@@ -963,13 +1050,15 @@ def build_balanced_fallback_plan(
         return sum(float(item["end"]) - float(item["start"]) for item in selected)
 
     def _setting_share(setting: str) -> float:
+        """Setting share of the full plan; open/CTA durations count in the
+        denominator but only middle beats are eligible to be trimmed."""
         total_dur = _plan_total()
         if total_dur <= 0:
             return 0.0
         used = sum(
             float(item["end"]) - float(item["start"])
             for item in selected
-            if str(item.get("_setting")) == setting
+            if item.get("_role") == "middle" and str(item.get("_setting")) == setting
         )
         return used / total_dur
 
@@ -986,8 +1075,9 @@ def build_balanced_fallback_plan(
         ]
         if not overweight:
             break
-        # Drop the shortest middle clip from the most overweight setting.
         setting = max(overweight, key=_setting_share)
+        # Drop lower-energy middle beats first so kids peaks survive share caps;
+        # never drop reserved open/CTA bookends.
         middle = [
             item
             for item in selected
@@ -995,7 +1085,13 @@ def build_balanced_fallback_plan(
         ]
         if not middle:
             break
-        victim = min(middle, key=lambda item: float(item["end"]) - float(item["start"]))
+        middle.sort(
+            key=lambda item: (
+                0 if not item.get("_peak", True) else 1,
+                float(item["end"]) - float(item["start"]),
+            )
+        )
+        victim = middle[0]
         selected.remove(victim)
         duration = float(victim["end"]) - float(victim["start"])
         setting_duration[setting] = max(0.0, setting_duration[setting] - duration)
@@ -1009,7 +1105,6 @@ def build_balanced_fallback_plan(
     middle_items: list[dict[str, Any]] = []
     for item in selected:
         role = str(item.pop("_role", "middle") or "middle")
-        item.pop("_capture_time", None)
         item.pop("_score", None)
         item.pop("_playful", None)
         is_greeting_open = bool(item.pop("_greeting", False))
@@ -1018,11 +1113,17 @@ def build_balanced_fallback_plan(
         item["_section_setting"] = setting
         item["_section_hooks"] = hooks
         if role == "open":
+            item.pop("_capture_time", None)
+            item.pop("_energy", None)
+            item.pop("_peak", None)
             item["_greeting_open"] = is_greeting_open or (
                 "Greeting / start-of-day open" in str(item.get("note", ""))
             )
             open_clips.append(item)
         elif role == "cta":
+            item.pop("_capture_time", None)
+            item.pop("_energy", None)
+            item.pop("_peak", None)
             cta_clips.append(item)
         else:
             middle_items.append(item)
@@ -1032,6 +1133,10 @@ def build_balanced_fallback_plan(
         for clip in clips:
             for hook in clip.pop("_section_hooks", []) or []:
                 hook_counts[str(hook)] += 1
+            clip.pop("_section_setting", None)
+            clip.pop("_capture_time", None)
+            clip.pop("_energy", None)
+            clip.pop("_peak", None)
         top_hooks = sorted(hook_counts, key=lambda name: (-hook_counts[name], name))[:2]
         label = setting.replace("_", " ").title()
         if top_hooks:
@@ -1047,6 +1152,74 @@ def build_balanced_fallback_plan(
                 f"Chronological {setting} coverage; prefer children and kid-interesting activity."
             )
         return {"section": section, "description": description, "clips": clips}
+
+    def _energy_band_section(
+        title: str,
+        description: str,
+        clips: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        hook_counts: dict[str, int] = defaultdict(int)
+        cleaned: list[dict[str, Any]] = []
+        for clip in clips:
+            for hook in clip.pop("_section_hooks", []) or []:
+                hook_counts[str(hook)] += 1
+            clip.pop("_section_setting", None)
+            clip.pop("_capture_time", None)
+            clip.pop("_energy", None)
+            clip.pop("_peak", None)
+            cleaned.append(clip)
+        if hook_counts:
+            top = sorted(hook_counts, key=lambda name: (-hook_counts[name], name))[:2]
+            hook_label = " + ".join(h.replace("_", " ") for h in top)
+            title = f"{title} — {hook_label}"
+        return {"section": title, "description": description, "clips": cleaned}
+
+    def _split_peak_bands(
+        clips: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if not clips:
+            return [], []
+        ranked = sorted(
+            clips,
+            key=lambda item: (
+                -float(item.get("_energy", 0) or 0),
+                str(item.get("_capture_time") or "9999"),
+                float(item.get("start", 0)),
+                str(item.get("file", "")),
+            ),
+        )
+        total_dur = sum(float(item["end"]) - float(item["start"]) for item in ranked)
+        if len(ranked) == 1 or total_dur <= 0:
+            return ranked, []
+        midpoint = total_dur / 2.0
+        first: list[dict[str, Any]] = []
+        second: list[dict[str, Any]] = []
+        running = 0.0
+        for item in ranked:
+            dur = float(item["end"]) - float(item["start"])
+            if not first or (running < midpoint and len(second) == 0 and running + dur <= midpoint * 1.15):
+                first.append(item)
+                running += dur
+            else:
+                second.append(item)
+        if not second and len(first) > 1:
+            second = [first.pop()]
+        # Local capture flow inside each peak band.
+        first.sort(
+            key=lambda item: (
+                str(item.get("_capture_time") or "9999"),
+                float(item.get("start", 0)),
+                str(item.get("file", "")),
+            )
+        )
+        second.sort(
+            key=lambda item: (
+                str(item.get("_capture_time") or "9999"),
+                float(item.get("start", 0)),
+                str(item.get("file", "")),
+            )
+        )
+        return first, second
 
     if open_clips:
         greeting_open = False
@@ -1066,17 +1239,53 @@ def build_balanced_fallback_plan(
             }
         )
 
-    current_setting: str | None = None
-    current_clips: list[dict[str, Any]] = []
-    for item in middle_items:
-        setting = str(item.pop("_section_setting", "other"))
-        if setting != current_setting and current_clips:
+    if arc == "kids_energy":
+        peak_items = [item for item in middle_items if item.get("_peak")]
+        low_items = [item for item in middle_items if not item.get("_peak")]
+        peak1, peak2 = _split_peak_bands(peak_items)
+        low_items.sort(
+            key=lambda item: (
+                str(item.get("_capture_time") or "9999"),
+                float(item.get("start", 0)),
+                str(item.get("file", "")),
+            )
+        )
+        if peak1:
+            structure.append(
+                _energy_band_section(
+                    "Kids peak",
+                    "Highest kids-on-camera activity from the day (play, animals, water, treats).",
+                    peak1,
+                )
+            )
+        if peak2:
+            structure.append(
+                _energy_band_section(
+                    "Kids peak 2",
+                    "Second wave of strong kids activity beats.",
+                    peak2,
+                )
+            )
+        if low_items:
+            structure.append(
+                _energy_band_section(
+                    "Quiet / adult",
+                    "Lower-energy wait, transit, and adult moments — kept shorter and before goodbye.",
+                    low_items,
+                )
+            )
+    else:
+        current_setting: str | None = None
+        current_clips: list[dict[str, Any]] = []
+        for item in middle_items:
+            setting = str(item.pop("_section_setting", "other"))
+            if setting != current_setting and current_clips:
+                structure.append(_storyboard_section(current_setting, current_clips))
+                current_clips = []
+            current_setting = setting
+            current_clips.append(item)
+        if current_setting and current_clips:
             structure.append(_storyboard_section(current_setting, current_clips))
-            current_clips = []
-        current_setting = setting
-        current_clips.append(item)
-    if current_setting and current_clips:
-        structure.append(_storyboard_section(current_setting, current_clips))
 
     if cta_clips:
         for item in cta_clips:
@@ -1097,11 +1306,17 @@ def build_balanced_fallback_plan(
         if primary_day not in {"", "unknown"}
         else ""
     )
-    return {
-        "title": title,
-        "structure": structure,
-        "bgm_suggestion": "",
-        "editing_notes": (
+    if arc == "kids_energy":
+        editing_notes = (
+            "Kids-energy story arc: greeting/open → kids peak → kids peak 2 → "
+            "quiet/adult filler → goodbye. Priority 1: children on camera. "
+            "Priority 2: kid-interesting activity (play structures, animals, water play, "
+            "treats, discovery, rides). Low-activity transit/adult beats are capped and "
+            "placed before the CTA. Within each band, clips stay capture-time ordered."
+            f"{day_note}"
+        )
+    else:
+        editing_notes = (
             "Kids-audience chronological storyboard. Priority 1: children on camera/speaking. "
             "Priority 2: kid-interesting activity categories (play structures, animals/creatures, "
             "water play, treats, discovery/wonder, rides) — never place hardcodes. "
@@ -1109,8 +1324,14 @@ def build_balanced_fallback_plan(
             "preserve complete play narration, and bookend with a greeting/start-of-day open "
             "(or playful open if no greeting) plus a fuller CTA/goodbye close when footage allows."
             f"{day_note}"
-        ),
+        )
+    return {
+        "title": title,
+        "structure": structure,
+        "bgm_suggestion": "",
+        "editing_notes": editing_notes,
         "planning_day": primary_day,
+        "story_arc": arc,
     }
 
 
@@ -1310,6 +1531,7 @@ def create_balanced_plan(episode: Episode) -> dict[str, Any]:
         target_duration,
         title=str(episode.config["title"]),
         setting_order=list(episode.config.get("setting_order", [])),
+        story_arc=str(episode.config.get("story_arc", "kids_energy")),
     )
     fixed, errors = validate_and_fix_plan(
         fallback,
@@ -1396,6 +1618,7 @@ Broken plan:
                 target_duration,
                 title=str(episode.config["title"]),
                 setting_order=list(episode.config.get("setting_order", [])),
+                story_arc=str(episode.config.get("story_arc", "kids_energy")),
             )
             fixed, errors = validate_and_fix_plan(
                 fallback,

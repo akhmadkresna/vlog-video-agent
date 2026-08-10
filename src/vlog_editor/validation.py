@@ -221,7 +221,14 @@ def validate_and_fix_plan(
                         f"{context}: range overlaps another use of {filename} by {overlap:.2f}s"
                     )
             capture_time = str(source.get("metadata", {}).get("capture_time") or "")
-            if capture_time and previous_capture_time and capture_time < previous_capture_time:
+            story_arc = str(fixed.get("story_arc") or "chronological").strip().lower()
+            enforce_chrono = story_arc not in {"kids_energy", "energy", "kids"}
+            if (
+                enforce_chrono
+                and capture_time
+                and previous_capture_time
+                and capture_time < previous_capture_time
+            ):
                 errors.append(
                     f"{context}: capture time {capture_time} is earlier than previous "
                     f"selection {previous_capture_time}; keep the plan chronological"
@@ -263,9 +270,13 @@ def validate_and_fix_plan(
         infer_setting(clip) for clip in diversity_pool if infer_setting(clip) != "other"
     }
     selected_duration_by_setting: dict[str, float] = defaultdict(float)
+    body_duration_by_setting: dict[str, float] = defaultdict(float)
+    bookend_sections = {"greeting open", "playful open", "cta close"}
     for section in structure:
         if not isinstance(section, dict):
             continue
+        section_name = str(section.get("section", "")).strip().lower()
+        is_bookend = section_name in bookend_sections
         for clip in section.get("clips", []):
             if not isinstance(clip, dict):
                 continue
@@ -276,7 +287,11 @@ def validate_and_fix_plan(
                 selected_duration = float(clip["end"]) - float(clip["start"])
             except (KeyError, TypeError, ValueError):
                 continue
-            selected_duration_by_setting[infer_setting(source)] += max(0.0, selected_duration)
+            selected_duration = max(0.0, selected_duration)
+            setting = infer_setting(source)
+            selected_duration_by_setting[setting] += selected_duration
+            if not is_bookend:
+                body_duration_by_setting[setting] += selected_duration
 
     required_settings = min(4, len(available_settings))
     selected_available_settings = available_settings.intersection(selected_duration_by_setting)
@@ -286,9 +301,11 @@ def validate_and_fix_plan(
             f"{len(selected_available_settings)} of {len(available_settings)} available settings; "
             f"at least {required_settings} are required"
         )
-    if len(available_settings) >= 3 and total > 0:
+    # Open/CTA count toward the denominator but not the numerator, so reserved
+    # bookends do not force kids-peak settings over the 40% cap by themselves.
+    if len(available_settings) >= 3 and total > 0 and body_duration_by_setting:
         dominant_setting, dominant_duration = max(
-            selected_duration_by_setting.items(),
+            body_duration_by_setting.items(),
             key=lambda item: item[1],
             default=("other", 0.0),
         )

@@ -27,7 +27,9 @@ Use the `ve` CLI. Do not recreate its media logic in ad-hoc scripts.
 - All AI inference stays local through Ollama at `127.0.0.1`.
 - Never bypass the plan-hash approval gate.
 - Never cut through a spoken word; retain validator corrections.
-- Keep plans chronological by capture time; prefer one primary capture day.
+- Keep one primary capture day. Default `story_arc: kids_energy` orders the edit as
+  open → kids peak → kids peak 2 → quiet/adult → goodbye (capture-time within each band).
+  Set `story_arc: chronological` for full capture-time order.
 - Prefer original footage over duplicate `Copy` files.
 - Do not run faster-whisper and Qwen concurrently on the 8 GB GPU.
 - Use local audio packs only (`cc0`, `public_domain`, `youtube_audio_library`, `pixabay`, `original`, `user_provided`).
