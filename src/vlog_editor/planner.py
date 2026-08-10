@@ -462,9 +462,7 @@ def is_low_activity_source(source: dict[str, Any]) -> bool:
     return not is_peak_kids_source(source)
 
 
-SCENE_GAP_SEC = 45 * 60
-# Keep micro setting-flips together only when nearly continuous.
-SCENE_MERGE_GAP_SEC = 12 * 60
+SCENE_GAP_SEC = 40 * 60
 
 
 def _capture_epoch(capture_time: str) -> float | None:
@@ -483,9 +481,8 @@ def cluster_contiguous_scenes(
     items: list[dict[str, Any]],
     *,
     gap_sec: float = SCENE_GAP_SEC,
-    merge_gap_sec: float = SCENE_MERGE_GAP_SEC,
 ) -> list[list[dict[str, Any]]]:
-    """Group clips into contiguous day scenes (time + setting), not whole-day buckets."""
+    """Group clips into contiguous same-setting scenes (not whole-day buckets)."""
     ordered = sorted(
         items,
         key=lambda item: (
@@ -508,11 +505,7 @@ def cluster_contiguous_scenes(
             gap = float("inf")
         else:
             gap = max(0.0, cur_time - prev_time)
-        same_setting = cur_setting == prev_setting
-        if same_setting and gap <= gap_sec:
-            clusters[-1].append(item)
-        elif (not same_setting) and gap <= merge_gap_sec:
-            # Short walk from playground→restaurant patio can stay one beat cluster.
+        if cur_setting == prev_setting and gap <= gap_sec:
             clusters[-1].append(item)
         else:
             clusters.append([item])
