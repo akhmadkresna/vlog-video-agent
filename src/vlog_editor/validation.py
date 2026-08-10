@@ -119,19 +119,22 @@ def _speech_bounds(
     segments: list[dict[str, Any]] | None = None,
     max_expand: float = 4.0,
 ) -> tuple[float, float]:
+    original_start = start
+    original_end = end
     overlapping = [
         word
         for word in words
-        if float(word.get("end", 0)) > start and float(word.get("start", 0)) < end
+        if float(word.get("end", 0)) > original_start and float(word.get("start", 0)) < original_end
     ]
     if overlapping:
         first, last = overlapping[0], overlapping[-1]
-        if float(first["start"]) < start < float(first["end"]):
+        if float(first["start"]) < original_start < float(first["end"]):
             start = max(0.0, float(first["start"]) - pad_start)
-        if float(last["start"]) < end < float(last["end"]):
+        if float(last["start"]) < original_end < float(last["end"]):
             end = float(last["end"]) + pad_end
 
     # Prefer complete ASR segments so fooling-around narration is not bisected.
+    # Only snap using the original cut points — never chain-expand through neighbors.
     if segments:
         for segment in segments:
             try:
@@ -139,10 +142,10 @@ def _speech_bounds(
                 seg_end = float(segment.get("end", 0))
             except (TypeError, ValueError):
                 continue
-            if seg_start < start < seg_end and (start - seg_start) <= max_expand:
-                start = max(0.0, seg_start - pad_start)
-            if seg_start < end < seg_end and (seg_end - end) <= max_expand:
-                end = seg_end + pad_end
+            if seg_start < original_start < seg_end and (original_start - seg_start) <= max_expand:
+                start = max(0.0, min(start, seg_start - pad_start))
+            if seg_start < original_end < seg_end and (seg_end - original_end) <= max_expand:
+                end = max(end, seg_end + pad_end)
     return start, end
 
 

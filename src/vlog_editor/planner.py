@@ -628,7 +628,7 @@ def build_balanced_fallback_plan(
     setting_duration: dict[str, float] = defaultdict(float)
     total = 0.0
     # Leave room for validator speech/segment expansion so multi-beats do not overlap.
-    AVOID_PAD_SEC = 2.5
+    AVOID_PAD_SEC = 6.5
     open_selection: dict[str, Any] | None = None
     cta_selection: dict[str, Any] | None = None
 
