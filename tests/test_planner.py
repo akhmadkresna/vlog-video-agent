@@ -251,6 +251,50 @@ def test_excerpt_prefers_children_speech_window_over_adult_talk() -> None:
     assert end <= 90
 
 
+def test_excerpt_prefers_kids_audience_activity_over_flat_talk() -> None:
+    """Secondary priority: kid-interesting activity categories, not place hardcodes."""
+    source = {
+        "metadata": {"duration": 120},
+        "audio": {
+            "segments": [
+                {
+                    "start": 8,
+                    "end": 22,
+                    "text": "the parking ticket machine is confusing and the line is long",
+                },
+                {
+                    "start": 75,
+                    "end": 90,
+                    "text": "lihat ya ada hewan lucu di kolam yuk kita explore",
+                },
+            ],
+            "words": [],
+            "text": "hewan lucu explore",
+        },
+        "visual": {
+            "summary": "Kids look at animals near the water while exploring outdoors",
+            "subjects": ["children", "animals", "water"],
+            "recommended_ranges": [{"start": 0, "end": 120}],
+        },
+    }
+    start, end = select_excerpt(source, 30)
+    assert start >= 70
+    assert end <= 95
+
+
+def test_kids_audience_categories_are_activity_types_not_place_hardcodes() -> None:
+    from vlog_editor.audio_plan import kids_audience_categories, kids_audience_interest
+
+    text = "children watch animals near the water and then climb the playground"
+    cats = kids_audience_categories(text)
+    assert "animals" in cats
+    assert "water_play" in cats or "play_structure" in cats
+    assert kids_audience_interest(text) >= 0.5
+    # No dedicated fish-pond category — fish maps to animals.
+    assert "fish_pond" not in cats
+    assert "animals" in kids_audience_categories("kids point at fish in the pond")
+
+
 def test_clip_score_prefers_children_over_scenic_adult_clip() -> None:
     from vlog_editor.planner import _clip_score, source_has_children
 

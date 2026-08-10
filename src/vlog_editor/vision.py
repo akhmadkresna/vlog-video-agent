@@ -126,14 +126,18 @@ Return only compact JSON with this schema:
   "quality": 0.0,
   "motion": 0.0,
   "story_value": 0.0,
+  "kids_audience_value": 0.0,
+  "kids_hooks": ["play_structure|animals|water_play|treats|discovery|ride_fun"],
   "issues": ["blur, shake, obstruction, duplicate, poor exposure, or empty"],
   "recommended_ranges": [{{"start": 0.0, "end": 8.0, "reason": "why this exact moment"}}]
 }}
-Scores are 0..1. Do not invent speech. Keep ranges inside the clip. Return 1-4
-strongest ranges in best-first order. Pure visual ranges should be 2-8 seconds;
-spoken ranges may be 5-30 seconds and must preserve a complete exchange. For
-clips longer than 60 seconds, sample moments across the clip and never recommend
-the entire clip or default every range to 0.
+Scores are 0..1. kids_audience_value rates how engaging the beat is for a kids audience
+using activity categories in kids_hooks (not specific place names). Prefer recommended
+ranges where children are on camera or a kids-audience activity is happening. Do not
+invent speech. Keep ranges inside the clip. Return 1-4 strongest ranges in best-first
+order. Pure visual ranges should be 2-8 seconds; spoken ranges may be 5-30 seconds and
+must preserve a complete exchange. For clips longer than 60 seconds, sample moments
+across the clip and never recommend the entire clip or default every range to 0.
 """.strip()
         content, metrics = self.chat(prompt, images=frames)
         return parse_json_response(content), metrics

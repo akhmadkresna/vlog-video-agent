@@ -51,10 +51,90 @@ PLAY_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+# Activity-type cues for a kids audience (categories, not place hardcodes).
+# Example: animals covers fish/rabbits/birds — we never special-case "fish pond".
+KIDS_AUDIENCE_CATEGORIES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "play_structure",
+        re.compile(
+            r"\b("
+            r"playground|ayunan|slide|perosotan|jungkatan|climbing|climb|"
+            r"tunnel|ayun|ball\s*pit|trampoline|ayunan"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "animals",
+        re.compile(
+            r"\b("
+            r"animal|animals|hewan|fish|ikan|rabbit|kelinci|bird|burung|"
+            r"zoo|mini\s*zoo|kucing|cat|dog|anjing|duck|bebek"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "water_play",
+        re.compile(
+            r"\b("
+            r"pool|renang|swim|swimming|splash|water\s*play|kolam|"
+            r"fountain|pancuran|beach|pantai"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "treats",
+        re.compile(
+            r"\b("
+            r"donut|donat|ice\s*cream|es\s*krim|candy|permen|snack|"
+            r"cookies|kue|dessert|sweet|manis|gelato"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "discovery",
+        re.compile(
+            r"\b("
+            r"look|lihat|wow|surprise|kaget|curious|penasaran|point|"
+            r"tunjuk|discover|explore|jelajah|amazing|keren|lihat\s*ya"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "ride_fun",
+        re.compile(
+            r"\b("
+            r"carousel|komedi\s*putar|ride|wahana|train\s*ride|"
+            r"scooter|sepeda|stroller\s*ride"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
 
 
 def text_has_children(text: str) -> bool:
     return bool(CHILDREN_RE.search(text or ""))
+
+
+def kids_audience_categories(text: str) -> list[str]:
+    blob = text or ""
+    return [name for name, pattern in KIDS_AUDIENCE_CATEGORIES if pattern.search(blob)]
+
+
+def kids_audience_interest(text: str) -> float:
+    """0..1 score for how interesting the beat is to a kids audience."""
+    categories = kids_audience_categories(text)
+    if not categories:
+        return 0.0
+    # Diminishing returns for stacking categories in one window.
+    return min(1.0, 0.34 * len(categories) + (0.12 if PLAY_RE.search(text or "") else 0.0))
+
+
 MAX_MEME_PER_TOTAL = 14.0
 
 INTRO_SEC = 8.0

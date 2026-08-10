@@ -12,6 +12,8 @@ from vlog_editor.audio_plan import (
     CUTE_RE,
     LAUGH_RE,
     PLAY_RE,
+    kids_audience_categories,
+    kids_audience_interest,
     plan_audio_cues,
     text_has_children,
 )
@@ -24,8 +26,8 @@ MIN_SELECTION_SEC = 10.0
 DEFAULT_MAX_SELECTION_SEC = 36.0
 PLAY_MAX_SELECTION_SEC = 55.0
 MAX_PLAY_BEATS_PER_CLIP = 3
-OPEN_CTA_BEAT_SEC = 12.0
-MIN_OPEN_CTA_SEC = 8.0
+OPEN_CTA_BEAT_SEC = 22.0
+MIN_OPEN_CTA_SEC = 12.0
 # Hold part of the middle budget for the last portion of the capture day so
 # evening settings (e.g. night mall) are not starved by long daytime play beats.
 LATE_DAY_FRACTION = 0.30
@@ -61,6 +63,15 @@ def is_playful_source(source: dict[str, Any]) -> bool:
 def source_has_children(source: dict[str, Any]) -> bool:
     """True when subjects/summary/transcript point at children on camera or speaking."""
     return text_has_children(_source_text(source))
+
+
+def source_kids_audience_interest(source: dict[str, Any]) -> float:
+    """Secondary priority: activity types fun for a kids audience (not place hardcodes)."""
+    return kids_audience_interest(_source_text(source))
+
+
+def source_kids_audience_categories(source: dict[str, Any]) -> list[str]:
+    return kids_audience_categories(_source_text(source))
 
 
 def is_cta_source(source: dict[str, Any]) -> bool:
@@ -162,11 +173,13 @@ def select_excerpt(
 
     ranges = source.get("visual", {}).get("recommended_ranges", [])
     clip_has_children = source_has_children(source)
-    # Prefer kid-focused recommended ranges before generic focused ranges.
+    # Prefer kid / kids-audience recommended ranges before generic focused ranges.
     ordered_ranges = sorted(
         (item for item in ranges if isinstance(item, dict)),
         key=lambda item: (
             0 if text_has_children(str(item.get("reason", ""))) else 1,
+            0 if kids_audience_interest(str(item.get("reason", ""))) > 0 else 1,
+            -kids_audience_interest(str(item.get("reason", ""))),
             float(item.get("start", 0) or 0),
         ),
     )
@@ -237,6 +250,7 @@ def select_excerpt(
         # Inside family footage, demote adult-only windows so kids beats win.
         if clip_has_children and not text_has_children(text):
             children_bonus -= 2.0
+        audience_bonus = 2.2 * kids_audience_interest(text)
         center = (start + end) / 2
         center_preference = 1 - abs(center - source_duration / 2) / max(source_duration, 1)
         score = (
@@ -246,6 +260,7 @@ def select_excerpt(
             + completeness * 2.5
             + play_bonus
             + children_bonus
+            + audience_bonus
         )
         candidates.append((score, start, end))
     if candidates:
@@ -293,6 +308,11 @@ def _clip_score(clip: dict[str, Any]) -> float:
     if source_has_children(clip):
         score = max(score, 0.68)
         score = min(1.0, score + 0.15)
+    # Secondary: kid-audience activity interest (play structures, animals, water,
+    # treats, discovery — category cues, not place hardcodes).
+    audience = source_kids_audience_interest(clip)
+    if audience > 0:
+        score = min(1.0, score + 0.10 * audience)
     return score
 
 
@@ -447,6 +467,9 @@ def _selection_from_source(
     note = str(source.get("visual", {}).get("summary", ""))
     if is_playful_source(source):
         note = f"{note} Keep fooling-around / play beat.".strip()
+    hooks = source_kids_audience_categories(source)
+    if hooks:
+        note = f"{note} Kids-audience hooks: {', '.join(hooks)}.".strip()
     return {
         "file": str(metadata.get("filename", "")),
         "start": round(start, 3),
@@ -457,6 +480,7 @@ def _selection_from_source(
         "_setting": infer_setting(source),
         "_score": _clip_score(source),
         "_playful": is_playful_source(source),
+        "_kids_hooks": hooks,
     }
 
 
@@ -836,8 +860,10 @@ def build_balanced_fallback_plan(
         item.pop("_capture_time", None)
         item.pop("_score", None)
         item.pop("_playful", None)
+        hooks = [str(h) for h in (item.pop("_kids_hooks", []) or []) if str(h).strip()]
         setting = str(item.pop("_setting", "other"))
         item["_section_setting"] = setting
+        item["_section_hooks"] = hooks
         if role == "open":
             open_clips.append(item)
         elif role == "cta":
@@ -845,13 +871,37 @@ def build_balanced_fallback_plan(
         else:
             middle_items.append(item)
 
+    def _storyboard_section(setting: str, clips: list[dict[str, Any]]) -> dict[str, Any]:
+        hook_counts: dict[str, int] = defaultdict(int)
+        for clip in clips:
+            for hook in clip.pop("_section_hooks", []) or []:
+                hook_counts[str(hook)] += 1
+        top_hooks = sorted(hook_counts, key=lambda name: (-hook_counts[name], name))[:2]
+        label = setting.replace("_", " ").title()
+        if top_hooks:
+            hook_label = " + ".join(h.replace("_", " ") for h in top_hooks)
+            section = f"{label} — Kids {hook_label}"
+            description = (
+                f"Kids-audience storyboard beat in {setting}: prioritize {hook_label} "
+                f"with children on camera when available."
+            )
+        else:
+            section = f"{label} — Best moments"
+            description = (
+                f"Chronological {setting} coverage; prefer children and kid-interesting activity."
+            )
+        return {"section": section, "description": description, "clips": clips}
+
     if open_clips:
         for item in open_clips:
             item.pop("_section_setting", None)
+            item.pop("_section_hooks", None)
         structure.append(
             {
                 "section": "Playful open",
-                "description": "Cold-open fun / fooling-around beat from early footage.",
+                "description": (
+                    "Kids-audience cold-open: early fun / fooling-around with children when possible."
+                ),
                 "clips": open_clips,
             }
         )
@@ -861,32 +911,23 @@ def build_balanced_fallback_plan(
     for item in middle_items:
         setting = str(item.pop("_section_setting", "other"))
         if setting != current_setting and current_clips:
-            structure.append(
-                {
-                    "section": f"{current_setting.replace('_', ' ').title()} — Best moments",
-                    "description": f"Chronological coverage of the {current_setting} setting.",
-                    "clips": current_clips,
-                }
-            )
+            structure.append(_storyboard_section(current_setting, current_clips))
             current_clips = []
         current_setting = setting
         current_clips.append(item)
     if current_setting and current_clips:
-        structure.append(
-            {
-                "section": f"{current_setting.replace('_', ' ').title()} — Best moments",
-                "description": f"Chronological coverage of the {current_setting} setting.",
-                "clips": current_clips,
-            }
-        )
+        structure.append(_storyboard_section(current_setting, current_clips))
 
     if cta_clips:
         for item in cta_clips:
             item.pop("_section_setting", None)
+            item.pop("_section_hooks", None)
         structure.append(
             {
                 "section": "CTA close",
-                "description": "Closing smile / thanks / wave beat from late footage.",
+                "description": (
+                    "Kids-audience close: smile / thanks / bye / night goodbye from late footage."
+                ),
                 "clips": cta_clips,
             }
         )
@@ -901,11 +942,12 @@ def build_balanced_fallback_plan(
         "structure": structure,
         "bgm_suggestion": "",
         "editing_notes": (
-            "Deterministic chronological balanced plan. Selections follow capture time, "
-            "deduplicate copies, keep setting diversity within one capture day "
-            "(including late-day settings such as evening mall), "
-            "preserve complete fooling-around / play narration beats, and bookend with "
-            "a playful open plus CTA close when footage allows."
+            "Kids-audience chronological storyboard. Priority 1: children on camera/speaking. "
+            "Priority 2: kid-interesting activity categories (play structures, animals/creatures, "
+            "water play, treats, discovery/wonder, rides) — never place hardcodes. "
+            "Keep setting diversity within one capture day (including late-day evening beats), "
+            "preserve complete play narration, and bookend with playful open plus a fuller CTA/"
+            "goodbye close when footage allows."
             f"{day_note}"
         ),
         "planning_day": primary_day,
@@ -977,6 +1019,9 @@ def _compact_analysis(analysis: dict[str, Any]) -> list[dict[str, Any]]:
                 "quality": visual.get("quality", 0),
                 "motion": visual.get("motion", 0),
                 "story_value": visual.get("story_value", 0),
+                "kids_audience_categories": source_kids_audience_categories(clip),
+                "kids_audience_interest": round(source_kids_audience_interest(clip), 3),
+                "has_children": source_has_children(clip),
                 "issues": visual.get("issues", []),
                 "recommended_ranges": visual.get("recommended_ranges", []),
                 "transcript": str(audio.get("text", ""))[:400],
@@ -1000,16 +1045,22 @@ Rules:
 - Prefer original filenames over duplicate "Copy" files.
 - Use a hook, development, highlight, and emotional close; 4-10 sections total.
 - Prefer landscape, high quality, motion and story value. Skip poor/redundant footage.
-- Prioritize moments where children are visible or speaking (subjects/transcript cues like
-  anak, adek, child, kid). Avoid adult-only B-roll when a nearby kids beat exists in the
-  same clip or day.
+- Storyboard for a kids audience:
+  1) Primary: children visible or speaking (anak/adek/child/kid cues).
+  2) Secondary: kid-interesting ACTIVITY CATEGORIES — play structures, animals/creatures,
+     water play, treats/sweets, discovery/wonder reactions, fun rides. Prefer these over
+     flat adult talk or empty scenery. Do NOT hardcode specific places (no "must include
+     fish pond"); pick whatever kid-interesting activity the analysis actually shows.
+- Name sections like a kids storyboard when helpful (e.g. "Outdoor — Kids water play"),
+  still keeping capture chronology.
 - Pure visual shots usually last 2-6 seconds. Preserve complete useful speech.
 - Kids fooling-around / play / laugh narration is high value — keep complete exchanges
   (often 20-55s). Do not strip playful speech just to hit pacing. Long play takes may
   contribute 2-3 distinct non-overlapping beats instead of one tiny slice.
 - Open with a short playful cold-open (about 8-14s) from early real footage when available.
-- Close with a CTA-style b-roll beat (smile / thanks / bye / wave, about 8-14s) from late
-  real footage. Do not invent clips. Keep capture_time order (open earliest, CTA latest).
+- Close with a CTA-style goodbye beat (smile / thanks / bye / wave / night pulang,
+  about 12-24s) from late real footage. Do not invent clips. Keep capture_time order
+  (open earliest, CTA latest).
 - Never start or end a spoken selection mid-sentence when a nearby ASR segment boundary fits.
 - Cover every major distinct location or activity that has usable footage, with at least
   four settings when available on the chosen day.
