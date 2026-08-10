@@ -462,6 +462,93 @@ def is_low_activity_source(source: dict[str, Any]) -> bool:
     return not is_peak_kids_source(source)
 
 
+SCENE_GAP_SEC = 45 * 60
+# Keep micro setting-flips together only when nearly continuous.
+SCENE_MERGE_GAP_SEC = 12 * 60
+
+
+def _capture_epoch(capture_time: str) -> float | None:
+    text = str(capture_time or "").strip()
+    if not text:
+        return None
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def cluster_contiguous_scenes(
+    items: list[dict[str, Any]],
+    *,
+    gap_sec: float = SCENE_GAP_SEC,
+    merge_gap_sec: float = SCENE_MERGE_GAP_SEC,
+) -> list[list[dict[str, Any]]]:
+    """Group clips into contiguous day scenes (time + setting), not whole-day buckets."""
+    ordered = sorted(
+        items,
+        key=lambda item: (
+            str(item.get("_capture_time") or "9999"),
+            float(item.get("start", 0) or 0),
+            str(item.get("file", "")),
+        ),
+    )
+    clusters: list[list[dict[str, Any]]] = []
+    for item in ordered:
+        if not clusters:
+            clusters.append([item])
+            continue
+        previous = clusters[-1][-1]
+        prev_time = _capture_epoch(str(previous.get("_capture_time") or ""))
+        cur_time = _capture_epoch(str(item.get("_capture_time") or ""))
+        prev_setting = str(previous.get("_section_setting") or "other")
+        cur_setting = str(item.get("_section_setting") or "other")
+        if prev_time is None or cur_time is None:
+            gap = float("inf")
+        else:
+            gap = max(0.0, cur_time - prev_time)
+        same_setting = cur_setting == prev_setting
+        if same_setting and gap <= gap_sec:
+            clusters[-1].append(item)
+        elif (not same_setting) and gap <= merge_gap_sec:
+            # Short walk from playground→restaurant patio can stay one beat cluster.
+            clusters[-1].append(item)
+        else:
+            clusters.append([item])
+    return clusters
+
+
+def rank_clips_within_scene(clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Best→better by file energy; keep each file's beats in timeline order."""
+    by_file: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for clip in clips:
+        by_file[str(clip.get("file", ""))].append(clip)
+
+    ranked_files: list[tuple[float, bool, str, str, list[dict[str, Any]]]] = []
+    for filename, group in by_file.items():
+        energy = max(float(item.get("_energy", 0) or 0) for item in group)
+        peak = any(bool(item.get("_peak")) for item in group)
+        first_time = min(str(item.get("_capture_time") or "9999") for item in group)
+        group.sort(
+            key=lambda item: (
+                float(item.get("start", 0) or 0),
+                float(item.get("end", 0) or 0),
+            )
+        )
+        ranked_files.append((energy, peak, first_time, filename, group))
+
+    ranked_files.sort(key=lambda row: (-row[0], 0 if row[1] else 1, row[2], row[3]))
+    has_peak = any(row[1] for row in ranked_files)
+    ordered: list[dict[str, Any]] = []
+    for energy, peak, _first, _filename, group in ranked_files:
+        # If the scene already has strong kids beats, drop weak transit/adult pads.
+        if has_peak and (not peak) and energy < 0.34:
+            continue
+        ordered.extend(group)
+    return ordered or clips
+
+
 def _capture_time(clip: dict[str, Any]) -> str:
     return str(clip.get("metadata", {}).get("capture_time") or "")
 
@@ -902,6 +989,13 @@ def build_balanced_fallback_plan(
         if not candidates:
             continue
         candidates.sort(key=_clip_score, reverse=True)
+        # Scene-energy: don't force early transit/street pads just for diversity.
+        if (
+            arc == "scene_energy"
+            and setting not in late_settings
+            and not is_peak_kids_source(candidates[0])
+        ):
+            continue
         reserve_limit = 3 if setting in late_settings else 1
         reserved = 0
         for source in candidates:
@@ -918,8 +1012,8 @@ def build_balanced_fallback_plan(
                 reserved += 1
 
     # Fill remaining budget.
-    # scene_energy / kids_energy prefer peak kids activity and cap low filler;
-    # chronological walks capture order.
+    # scene_energy: walk the day in capture order (contiguous scenes later).
+    # kids_energy: global peak-first. chronological: plain capture walk.
     def _eligible_middle(source: dict[str, Any]) -> bool:
         if is_adult_meal_focus(source) and _clip_score(source) < 0.45:
             return False
@@ -936,24 +1030,9 @@ def build_balanced_fallback_plan(
             and len(selected_ranges.get(filename, [])) < MAX_PLAY_BEATS_PER_CLIP
         )
 
-    def _add_peak_then_low(sources: list[dict[str, Any]]) -> None:
+    def _add_low_activity(sources: list[dict[str, Any]], *, low_ratio: float) -> None:
         nonlocal total
-        peak_pool = sorted(
-            [clip for clip in sources if is_peak_kids_source(clip)],
-            key=lambda clip: (
-                -kids_energy_score(clip),
-                _capture_time(clip) or "9999",
-                str(clip.get("metadata", {}).get("filename", "")),
-            ),
-        )
-        for source in peak_pool:
-            if total >= middle_cap:
-                break
-            if not _eligible_middle(source) or not _can_add_more_beats(source):
-                continue
-            _try_add(source, allow_extra_beats=True)
-
-        low_cap = middle_cap * 0.24
+        low_cap = middle_cap * low_ratio
         low_used = sum(
             float(item["end"]) - float(item["start"])
             for item in selected
@@ -976,22 +1055,32 @@ def build_balanced_fallback_plan(
             low_used += max(0.0, total - before)
 
     if arc == "scene_energy":
-        # Walk scenes (settings) in first-seen capture order; inside each scene
-        # prefer best kids-energy sources before lower activity.
-        scenes: list[str] = []
-        seen_scene: set[str] = set()
-        for clip in pool:
-            setting = infer_setting(clip)
-            if setting not in seen_scene:
-                seen_scene.add(setting)
-                scenes.append(setting)
-        for setting in scenes:
+        # Keep day flow: peak kids sources in capture order, then a thin low-activity pad.
+        for source in pool:
             if total >= middle_cap:
                 break
-            scene_sources = [clip for clip in pool if infer_setting(clip) == setting]
-            _add_peak_then_low(scene_sources)
+            if not is_peak_kids_source(source):
+                continue
+            if not _eligible_middle(source) or not _can_add_more_beats(source):
+                continue
+            _try_add(source, allow_extra_beats=True)
+        _add_low_activity(pool, low_ratio=0.12)
     elif arc == "kids_energy":
-        _add_peak_then_low(pool)
+        peak_pool = sorted(
+            [clip for clip in pool if is_peak_kids_source(clip)],
+            key=lambda clip: (
+                -kids_energy_score(clip),
+                _capture_time(clip) or "9999",
+                str(clip.get("metadata", {}).get("filename", "")),
+            ),
+        )
+        for source in peak_pool:
+            if total >= middle_cap:
+                break
+            if not _eligible_middle(source) or not _can_add_more_beats(source):
+                continue
+            _try_add(source, allow_extra_beats=True)
+        _add_low_activity(pool, low_ratio=0.24)
     else:
         for source in pool:
             if total >= middle_cap:
@@ -1298,34 +1387,21 @@ def build_balanced_fallback_plan(
                 )
             )
     elif arc == "scene_energy":
-        # Scenes stay in capture-time order; inside each scene rank best→better energy.
-        by_scene: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        scene_first_time: dict[str, str] = {}
-        for item in middle_items:
-            setting = str(item.get("_section_setting", "other"))
-            by_scene[setting].append(item)
-            capture = str(item.get("_capture_time") or "9999")
-            previous = scene_first_time.get(setting)
-            if previous is None or capture < previous:
-                scene_first_time[setting] = capture
-        for setting in sorted(
-            by_scene,
-            key=lambda name: (
-                scene_first_time.get(name, "9999"),
-                name,
-            ),
-        ):
-            clips = by_scene[setting]
-            clips.sort(
-                key=lambda item: (
-                    -float(item.get("_energy", 0) or 0),
-                    0 if item.get("_peak") else 1,
-                    str(item.get("_capture_time") or "9999"),
-                    float(item.get("start", 0)),
-                    str(item.get("file", "")),
-                )
+        # Contiguous day scenes (not whole-day setting buckets). Inside each scene,
+        # rank files best→better; keep each file's beats in order.
+        for cluster in cluster_contiguous_scenes(middle_items):
+            if not cluster:
+                continue
+            ranked = rank_clips_within_scene(cluster)
+            # Dominant setting labels the section.
+            setting_counts: dict[str, int] = defaultdict(int)
+            for item in ranked:
+                setting_counts[str(item.get("_section_setting", "other"))] += 1
+            setting = max(
+                setting_counts,
+                key=lambda name: (setting_counts[name], name),
             )
-            structure.append(_storyboard_section(setting, clips))
+            structure.append(_storyboard_section(setting, ranked))
     else:
         current_setting: str | None = None
         current_clips: list[dict[str, Any]] = []
@@ -1369,10 +1445,11 @@ def build_balanced_fallback_plan(
         )
     elif arc == "scene_energy":
         editing_notes = (
-            "Scene-energy story arc: greeting/open → scenes in capture-time order → goodbye. "
-            "Inside each scene/setting, clips are ranked best→better by kids-on-camera energy "
-            "(play/animals/water/treats before wait/adult filler). Low-activity filler is capped. "
-            "Priority 1: children on camera. Priority 2: kid-interesting activity categories."
+            "Scene-energy story arc: greeting/open → contiguous day scenes in time order → "
+            "goodbye. Scenes split when setting/time jumps (so morning car stays separate from "
+            "night car). Inside each scene, files are ranked best→better by kids energy while "
+            "each file's beats stay timeline-ordered. Weak transit pads are dropped when a "
+            "scene already has strong kids beats."
             f"{day_note}"
         )
     else:

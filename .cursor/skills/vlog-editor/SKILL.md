@@ -27,9 +27,9 @@ Use the `ve` CLI. Do not recreate its media logic in ad-hoc scripts.
 - All AI inference stays local through Ollama at `127.0.0.1`.
 - Never bypass the plan-hash approval gate.
 - Never cut through a spoken word; retain validator corrections.
-- Keep one primary capture day. Default `story_arc: scene_energy` keeps scenes in
-  capture-time order and ranks best→better kids energy inside each scene.
-  Alternatives: `kids_energy` (global peak bands) or `chronological` (strict time order).
+- Keep one primary capture day. Default `story_arc: scene_energy` uses contiguous
+  day scenes in time order, ranking best→better kids energy inside each scene
+  (morning car ≠ night car). Alternatives: `kids_energy` or `chronological`.
 - Prefer original footage over duplicate `Copy` files.
 - Do not run faster-whisper and Qwen concurrently on the 8 GB GPU.
 - Use local audio packs only (`cc0`, `public_domain`, `youtube_audio_library`, `pixabay`, `original`, `user_provided`).

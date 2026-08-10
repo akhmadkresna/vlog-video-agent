@@ -4,6 +4,7 @@ import pytest
 
 from vlog_editor.planner import (
     build_balanced_fallback_plan,
+    cluster_contiguous_scenes,
     constrain_selection_lengths,
     is_playful_source,
     resolve_target_duration,
@@ -273,6 +274,15 @@ def test_scene_energy_arc_keeps_scene_time_order_and_ranks_within_scene() -> Non
     )
     car["visual"]["summary"] = "adult drives through traffic alone"
     car["visual"]["subjects"] = ["man", "car"]
+    night_car = _clip(
+        "night-car.mov",
+        40,
+        transcript="pulang malam",
+        setting="vehicle",
+        capture_time="2026-08-01T07:40:00.000000Z",
+    )
+    night_car["visual"]["summary"] = "family rides home in the car at night"
+    night_car["visual"]["subjects"] = ["family", "car"]
     bye = _clip(
         "bye.mov",
         30,
@@ -283,7 +293,15 @@ def test_scene_energy_arc_keeps_scene_time_order_and_ranks_within_scene() -> Non
     bye["visual"]["summary"] = "child smiles and waves goodbye"
     bye["visual"]["subjects"] = ["child"]
     analysis = {
-        "clips": [car, weak_outdoor, strong_outdoor, mid_outdoor, mall, bye]
+        "clips": [
+            car,
+            weak_outdoor,
+            strong_outdoor,
+            mid_outdoor,
+            mall,
+            night_car,
+            bye,
+        ]
     }
     plan = build_balanced_fallback_plan(analysis, 200, title="Scene day")
     fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=200)
@@ -292,27 +310,69 @@ def test_scene_energy_arc_keeps_scene_time_order_and_ranks_within_scene() -> Non
     assert fixed["story_arc"] == "scene_energy"
     names = [section["section"] for section in fixed["structure"]]
     assert names[-1] == "CTA close"
-    # Scene groups follow first-capture order: vehicle before outdoor before mall.
-    body = [
-        name
-        for name in names
-        if name not in {"Greeting open", "Playful open", "CTA close"}
-    ]
-    vehicle_i = next(i for i, name in enumerate(body) if name.lower().startswith("vehicle"))
-    outdoor_i = next(i for i, name in enumerate(body) if name.lower().startswith("outdoor"))
-    mall_i = next(i for i, name in enumerate(body) if name.lower().startswith("mall"))
-    assert vehicle_i < outdoor_i < mall_i
+    files = [clip["file"] for section in fixed["structure"] for clip in section["clips"]]
+    # Contiguous scenes: morning outdoor stay before mall; night car is not merged into morning car.
+    if "outdoor-strong.mov" in files and "mall-treat.mov" in files:
+        assert files.index("outdoor-strong.mov") < files.index("mall-treat.mov")
+    if "car-wait.mov" in files and "night-car.mov" in files:
+        assert files.index("car-wait.mov") < files.index("night-car.mov")
+        # Morning car and night car must live in different contiguous scene sections.
+        car_section_indexes = [
+            index
+            for index, section in enumerate(fixed["structure"])
+            for clip in section["clips"]
+            if clip["file"] == "car-wait.mov"
+        ]
+        night_section_indexes = [
+            index
+            for index, section in enumerate(fixed["structure"])
+            for clip in section["clips"]
+            if clip["file"] == "night-car.mov"
+        ]
+        assert car_section_indexes and night_section_indexes
+        assert car_section_indexes[0] != night_section_indexes[0]
     outdoor_section = next(
-        section
-        for section in fixed["structure"]
-        if str(section["section"]).lower().startswith("outdoor")
+        (
+            section
+            for section in fixed["structure"]
+            if str(section["section"]).lower().startswith("outdoor")
+        ),
+        None,
     )
-    outdoor_files = [clip["file"] for clip in outdoor_section["clips"]]
-    assert outdoor_files[0] == "outdoor-strong.mov"
-    if "outdoor-mid.mov" in outdoor_files and "outdoor-weak.mov" in outdoor_files:
-        assert outdoor_files.index("outdoor-mid.mov") < outdoor_files.index(
-            "outdoor-weak.mov"
-        )
+    if outdoor_section is not None:
+        outdoor_files = [clip["file"] for clip in outdoor_section["clips"]]
+        assert outdoor_files[0] == "outdoor-strong.mov"
+        assert "outdoor-weak.mov" not in outdoor_files
+
+
+def test_cluster_contiguous_scenes_splits_on_time_gap() -> None:
+    clips = [
+        {
+            "file": "a.mov",
+            "_capture_time": "2026-08-01T01:00:00.000000Z",
+            "_section_setting": "vehicle",
+            "start": 0,
+            "end": 10,
+        },
+        {
+            "file": "b.mov",
+            "_capture_time": "2026-08-01T01:10:00.000000Z",
+            "_section_setting": "vehicle",
+            "start": 0,
+            "end": 10,
+        },
+        {
+            "file": "c.mov",
+            "_capture_time": "2026-08-01T07:00:00.000000Z",
+            "_section_setting": "vehicle",
+            "start": 0,
+            "end": 10,
+        },
+    ]
+    clusters = cluster_contiguous_scenes(clips)
+    assert len(clusters) == 2
+    assert [item["file"] for item in clusters[0]] == ["a.mov", "b.mov"]
+    assert [item["file"] for item in clusters[1]] == ["c.mov"]
 def test_setting_order_cannot_override_capture_chronology() -> None:
     analysis = {
         "clips": [
@@ -544,7 +604,9 @@ def test_balanced_plan_avoids_long_adult_meal_stretch() -> None:
     clips[2]["visual"]["summary"] = "Kids climb playground tunnels"
     clips[2]["visual"]["subjects"] = ["children", "playground"]
 
-    plan = build_balanced_fallback_plan({"clips": clips}, 240, title="No adult meal pad")
+    plan = build_balanced_fallback_plan(
+        {"clips": clips}, 240, title="No adult meal pad", story_arc="kids_energy"
+    )
     meal_beats = [
         clip
         for section in plan["structure"]
@@ -759,7 +821,9 @@ def test_balanced_plan_keeps_late_day_mall_coverage() -> None:
     clips[-2]["visual"]["summary"] = "kids eat donuts at a mall food court"
     clips[-1]["visual"]["summary"] = "family leaves the mall and waves goodbye"
     analysis = {"clips": clips}
-    plan = build_balanced_fallback_plan(analysis, 360, title="Day with night mall")
+    plan = build_balanced_fallback_plan(
+        analysis, 360, title="Day with night mall", story_arc="chronological"
+    )
     mall_files = {
         clip["file"]
         for section in plan["structure"]
@@ -906,7 +970,9 @@ def test_balanced_plan_prefers_greeting_open_over_later_play() -> None:
         ]
     }
     analysis["clips"][-1]["visual"]["summary"] = "child smiles and waves goodbye"
-    plan = build_balanced_fallback_plan(analysis, 150, title="Family day")
+    plan = build_balanced_fallback_plan(
+        analysis, 150, title="Family day", story_arc="chronological"
+    )
     fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=150)
     assert errors == []
     assert fixed["structure"][0]["section"] == "Greeting open"
