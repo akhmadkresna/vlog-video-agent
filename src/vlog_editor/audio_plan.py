@@ -36,6 +36,13 @@ CUTE_RE = re.compile(
     r"\b(baby|bayi|adek|adik|anak|child|smile|senyum|main)\b",
     re.IGNORECASE,
 )
+CHILDREN_RE = re.compile(
+    r"\b("
+    r"child|children|kid|kids|boy|girl|baby|bayi|anak|adek|adik|"
+    r"toddler|son|daughter|mbak\s*merah|adek\s*arka|arka"
+    r")\b",
+    re.IGNORECASE,
+)
 PLAY_RE = re.compile(
     r"\b("
     r"main|bermain|mainan|play|playing|fool|fooling|chase|kejar|"
@@ -44,6 +51,10 @@ PLAY_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+def text_has_children(text: str) -> bool:
+    return bool(CHILDREN_RE.search(text or ""))
 MAX_MEME_PER_TOTAL = 14.0
 
 INTRO_SEC = 8.0

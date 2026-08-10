@@ -221,6 +221,62 @@ def test_excerpt_ignores_full_range_and_selects_interesting_speech_window() -> N
     assert end <= 73.0
 
 
+def test_excerpt_prefers_children_speech_window_over_adult_talk() -> None:
+    source = {
+        "metadata": {"duration": 120},
+        "audio": {
+            "segments": [
+                {
+                    "start": 5,
+                    "end": 20,
+                    "text": "parking is crowded today we should find another entrance soon",
+                },
+                {
+                    "start": 70,
+                    "end": 85,
+                    "text": "adek mbak merah main ayunan yuk ketawa seru banget",
+                },
+            ],
+            "words": [],
+            "text": "adek mbak merah main ayunan",
+        },
+        "visual": {
+            "summary": "A family with children at a playground",
+            "subjects": ["children", "playground"],
+            "recommended_ranges": [{"start": 0, "end": 120}],
+        },
+    }
+    start, end = select_excerpt(source, 30)
+    assert start >= 65
+    assert end <= 90
+
+
+def test_clip_score_prefers_children_over_scenic_adult_clip() -> None:
+    from vlog_editor.planner import _clip_score, source_has_children
+
+    kids = _clip(
+        "kids.mov",
+        40,
+        transcript="adek bermain di playground",
+        quality=0.55,
+        story_value=0.55,
+    )
+    kids["visual"]["summary"] = "children playing on the playground"
+    kids["visual"]["subjects"] = ["children", "playground"]
+    scenic = _clip(
+        "scenic.mov",
+        40,
+        transcript="nice road and trees ahead",
+        quality=0.8,
+        story_value=0.8,
+    )
+    scenic["visual"]["summary"] = "empty tree-lined road in soft light"
+    scenic["visual"]["subjects"] = ["trees", "road"]
+    assert source_has_children(kids)
+    assert not source_has_children(scenic)
+    assert _clip_score(kids) > _clip_score(scenic)
+
+
 def test_silent_long_clip_uses_centered_visual_excerpt() -> None:
     source = {
         "metadata": {"duration": 100},

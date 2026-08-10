@@ -7,7 +7,14 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from vlog_editor.audio_plan import CUTE_RE, LAUGH_RE, PLAY_RE, plan_audio_cues
+from vlog_editor.audio_plan import (
+    CHILDREN_RE,
+    CUTE_RE,
+    LAUGH_RE,
+    PLAY_RE,
+    plan_audio_cues,
+    text_has_children,
+)
 from vlog_editor.media import probe_video
 from vlog_editor.project import Episode, read_json, write_json
 from vlog_editor.validation import infer_setting, validate_and_fix_plan, validate_audio_plan
@@ -49,6 +56,11 @@ def is_playful_source(source: dict[str, Any]) -> bool:
     if CUTE_RE.search(text) and float(source.get("visual", {}).get("story_value", 0) or 0) >= 0.55:
         return True
     return False
+
+
+def source_has_children(source: dict[str, Any]) -> bool:
+    """True when subjects/summary/transcript point at children on camera or speaking."""
+    return text_has_children(_source_text(source))
 
 
 def is_cta_source(source: dict[str, Any]) -> bool:
@@ -149,9 +161,16 @@ def select_excerpt(
         return False
 
     ranges = source.get("visual", {}).get("recommended_ranges", [])
-    for item in ranges:
-        if not isinstance(item, dict):
-            continue
+    clip_has_children = source_has_children(source)
+    # Prefer kid-focused recommended ranges before generic focused ranges.
+    ordered_ranges = sorted(
+        (item for item in ranges if isinstance(item, dict)),
+        key=lambda item: (
+            0 if text_has_children(str(item.get("reason", ""))) else 1,
+            float(item.get("start", 0) or 0),
+        ),
+    )
+    for item in ordered_ranges:
         try:
             start = max(0.0, float(item.get("start", 0)))
             end = min(source_duration, float(item.get("end", source_duration)))
@@ -214,6 +233,10 @@ def select_excerpt(
         # Prefer fuller exchanges over tiny mid-sentence windows.
         completeness = min(1.0, (end - start) / max(12.0, max_duration * 0.5))
         play_bonus = 1.5 if PLAY_RE.search(text) or LAUGH_RE.search(text) else 0.0
+        children_bonus = 4.0 if text_has_children(text) else 0.0
+        # Inside family footage, demote adult-only windows so kids beats win.
+        if clip_has_children and not text_has_children(text):
+            children_bonus -= 2.0
         center = (start + end) / 2
         center_preference = 1 - abs(center - source_duration / 2) / max(source_duration, 1)
         score = (
@@ -222,6 +245,7 @@ def select_excerpt(
             + center_preference * 0.25
             + completeness * 2.5
             + play_bonus
+            + children_bonus
         )
         candidates.append((score, start, end))
     if candidates:
@@ -265,6 +289,10 @@ def _clip_score(clip: dict[str, Any]) -> float:
     if is_playful_source(clip):
         score = max(score, 0.62)
         score = min(1.0, score + 0.12)
+    # Explicit child presence outranks scenic adult-only B-roll.
+    if source_has_children(clip):
+        score = max(score, 0.68)
+        score = min(1.0, score + 0.15)
     return score
 
 
@@ -690,7 +718,10 @@ def build_balanced_fallback_plan(
             and len(selected_ranges.get(filename, [])) < MAX_PLAY_BEATS_PER_CLIP
         ):
             continue
-        if _clip_score(source) < 0.35:
+        if source_has_children(source):
+            if _clip_score(source) < 0.28:
+                continue
+        elif _clip_score(source) < 0.35:
             continue
         _try_add(source, allow_extra_beats=True)
 
@@ -969,6 +1000,9 @@ Rules:
 - Prefer original filenames over duplicate "Copy" files.
 - Use a hook, development, highlight, and emotional close; 4-10 sections total.
 - Prefer landscape, high quality, motion and story value. Skip poor/redundant footage.
+- Prioritize moments where children are visible or speaking (subjects/transcript cues like
+  anak, adek, child, kid). Avoid adult-only B-roll when a nearby kids beat exists in the
+  same clip or day.
 - Pure visual shots usually last 2-6 seconds. Preserve complete useful speech.
 - Kids fooling-around / play / laugh narration is high value — keep complete exchanges
   (often 20-55s). Do not strip playful speech just to hit pacing. Long play takes may
