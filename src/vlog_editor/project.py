@@ -54,7 +54,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "font_size": 48,
         "margin_v": 64,
     },
-    # scene_energy = scenes in capture order; best→better kids energy inside each scene
+    # Default story shape for balanced plans. Override per episode in project.yaml.
+    # scene_energy = contiguous same-setting scenes in capture order; best→better inside
     # kids_energy = open → global kids peak → peak 2 → quiet/adult → goodbye
     # chronological = full capture-time order
     "story_arc": "scene_energy",
