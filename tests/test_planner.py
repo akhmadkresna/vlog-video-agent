@@ -688,3 +688,71 @@ def test_balanced_plan_bookends_playful_open_and_cta_close() -> None:
     assert fixed["structure"][-1]["section"] == "CTA close"
     assert "Playful cold-open" in fixed["structure"][0]["clips"][0]["note"]
     assert "CTA close" in fixed["structure"][-1]["clips"][0]["note"]
+
+
+def test_balanced_plan_prefers_greeting_open_over_later_play() -> None:
+    greeting = _clip(
+        "car-hello.mov",
+        30,
+        transcript="Hai Assalamualaikum kita pagi ini mau kemana",
+        setting="vehicle",
+        capture_time="2026-08-01T01:00:00.000000Z",
+    )
+    greeting["visual"]["summary"] = "family of four in a car discussing the day"
+    greeting["visual"]["subjects"] = ["family", "car", "children"]
+    greeting["audio"]["segments"] = [
+        {
+            "start": 0.3,
+            "end": 12.0,
+            "text": "Hai Assalamualaikum kita pagi ini mau kemana",
+        },
+        {
+            "start": 12.0,
+            "end": 24.0,
+            "text": "kita mau renang ya di deket rumah aja",
+        },
+    ]
+    playground = _clip(
+        "later-play.mov",
+        40,
+        transcript="anak bermain di playground dan ketawa",
+        setting="outdoor",
+        capture_time="2026-08-01T03:00:00.000000Z",
+    )
+    playground["visual"]["summary"] = "kids playing on playground equipment"
+    playground["visual"]["subjects"] = ["children", "playground"]
+    analysis = {
+        "clips": [
+            greeting,
+            playground,
+            _clip(
+                "store.mov",
+                40,
+                setting="store",
+                capture_time="2026-08-01T05:00:00.000000Z",
+            ),
+            _clip(
+                "mall.mov",
+                40,
+                setting="mall",
+                capture_time="2026-08-01T07:00:00.000000Z",
+            ),
+            _clip(
+                "bye.mov",
+                30,
+                transcript="dadah ya makasih see you",
+                setting="outdoor",
+                capture_time="2026-08-01T08:00:00.000000Z",
+            ),
+        ]
+    }
+    analysis["clips"][-1]["visual"]["summary"] = "child smiles and waves goodbye"
+    plan = build_balanced_fallback_plan(analysis, 150, title="Family day")
+    fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=150)
+    assert errors == []
+    assert fixed["structure"][0]["section"] == "Greeting open"
+    open_clip = fixed["structure"][0]["clips"][0]
+    assert open_clip["file"] == "car-hello.mov"
+    assert "Greeting / start-of-day open" in open_clip["note"]
+    assert "Assalamualaikum" in open_clip["subtitle"] or "pagi ini" in open_clip["subtitle"]
+    assert fixed["structure"][-1]["section"] == "CTA close"

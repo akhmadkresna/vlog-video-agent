@@ -42,6 +42,26 @@ CTA_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Start-of-day / vlog greeting cues (ASR). Prefer these over mid-day playful cold-opens.
+GREETING_RE = re.compile(
+    r"("
+    r"assalamu'?alaikum|assalamualaikum|waalaikumsalam|"
+    r"\bselamat\s+pagi\b|\bpagi\s+ini\b|\bmau\s+kemana\b|"
+    r"\bkita\s+mau\b|\bberangkat\b|\budah\s+sampai\b|\bsudah\s+sampai\b|"
+    r"\boke\s+kita\s+sekarang\b|\blet'?s\s+go\b|"
+    r"\bhai\b|\bhalo\b|\bhello\b|\bhi\b"
+    r")",
+    re.IGNORECASE,
+)
+STRONG_GREETING_RE = re.compile(
+    r"("
+    r"assalamu'?alaikum|assalamualaikum|"
+    r"\bselamat\s+pagi\b|\bpagi\s+ini\b|\bmau\s+kemana\b|"
+    r"\budah\s+sampai\b|\bsudah\s+sampai\b|\boke\s+kita\s+sekarang\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def _source_text(source: dict[str, Any]) -> str:
     visual = source.get("visual", {})
@@ -121,6 +141,23 @@ def is_cta_source(source: dict[str, Any]) -> bool:
     return bool(CUTE_RE.search(text) and story >= 0.65)
 
 
+def _audio_text(source: dict[str, Any]) -> str:
+    audio = source.get("audio", {}) or {}
+    segments = audio.get("segments", []) or []
+    spoken = " ".join(str(segment.get("text", "")) for segment in segments if isinstance(segment, dict))
+    return f"{audio.get('text', '')} {spoken}".strip()
+
+
+def is_greeting_source(source: dict[str, Any]) -> bool:
+    """Spoken start-of-day greeting / departure narration (prefer ASR over visuals)."""
+    return bool(GREETING_RE.search(_audio_text(source)))
+
+
+def is_strong_greeting_source(source: dict[str, Any]) -> bool:
+    """Explicit greeting / 'pagi ini mau kemana' / arrival open — not a casual mid-day 'hai'."""
+    return bool(STRONG_GREETING_RE.search(_audio_text(source)))
+
+
 def _max_selection_for_source(source: dict[str, Any]) -> float:
     return PLAY_MAX_SELECTION_SEC if is_playful_source(source) else DEFAULT_MAX_SELECTION_SEC
 
@@ -197,6 +234,7 @@ def select_excerpt(
     max_duration: float,
     *,
     avoid: list[tuple[float, float]] | None = None,
+    prefer_greeting: bool = False,
 ) -> tuple[float, float]:
     source_duration = max(0.0, float(source.get("metadata", {}).get("duration", 0)))
     max_duration = min(max(0.0, max_duration), source_duration)
@@ -209,6 +247,51 @@ def select_excerpt(
             if min(end, previous_end) - max(start, previous_start) > 0.35:
                 return True
         return False
+
+    segments = [
+        segment
+        for segment in source.get("audio", {}).get("segments", [])
+        if isinstance(segment, dict)
+    ]
+
+    # Greeting opens should lock onto the spoken hello near the start of the take.
+    if prefer_greeting and segments:
+        greeting_hits: list[tuple[float, float, float]] = []
+        for segment in segments:
+            text = str(segment.get("text", ""))
+            if not GREETING_RE.search(text):
+                continue
+            try:
+                start = max(0.0, float(segment.get("start", 0)) - 0.08)
+            except (TypeError, ValueError):
+                continue
+            start, end = _complete_exchange(
+                segments,
+                start=start,
+                max_duration=max_duration,
+                source_duration=source_duration,
+            )
+            if end - start < 0.35 or overlaps_avoided(start, end):
+                continue
+            strength = 2.0 if STRONG_GREETING_RE.search(text) else 1.0
+            earliness = 1.0 - (start / max(source_duration, 1.0))
+            greeting_hits.append((strength + earliness, start, end))
+        if greeting_hits:
+            _, start, end = max(greeting_hits, key=lambda item: item[0])
+            # Grow enough to clear the open bookend minimum when the take has more speech.
+            if (
+                end - start + 1e-6 < MIN_OPEN_CTA_SEC
+                and source_duration + 1e-6 >= MIN_OPEN_CTA_SEC
+            ):
+                start, end = _complete_exchange(
+                    segments,
+                    start=start,
+                    max_duration=max(max_duration, MIN_OPEN_CTA_SEC + 2.0),
+                    source_duration=source_duration,
+                )
+                if end - start + 1e-6 < MIN_OPEN_CTA_SEC:
+                    end = min(source_duration, start + min(max_duration, MIN_OPEN_CTA_SEC))
+            return round(start, 3), round(min(end, start + max_duration), 3)
 
     ranges = source.get("visual", {}).get("recommended_ranges", [])
     clip_has_children = source_has_children(source)
@@ -234,11 +317,7 @@ def select_excerpt(
         )
         if span >= 0.35 and is_focused and not overlaps_avoided(start, min(end, start + max_duration)):
             start, end = _complete_exchange(
-                [
-                    segment
-                    for segment in source.get("audio", {}).get("segments", []) or []
-                    if isinstance(segment, dict)
-                ],
+                segments,
                 start=start,
                 max_duration=max_duration,
                 source_duration=source_duration,
@@ -246,11 +325,6 @@ def select_excerpt(
             if not overlaps_avoided(start, end):
                 return round(start, 3), round(min(end, start + max_duration), 3)
 
-    segments = [
-        segment
-        for segment in source.get("audio", {}).get("segments", [])
-        if isinstance(segment, dict)
-    ]
     words = [
         word for word in source.get("audio", {}).get("words", []) if isinstance(word, dict)
     ]
@@ -290,6 +364,10 @@ def select_excerpt(
         if clip_has_children and not text_has_children(text):
             children_bonus -= 2.0
         audience_bonus = 2.2 * kids_audience_interest(text)
+        greeting_bonus = 0.0
+        if prefer_greeting and GREETING_RE.search(text):
+            greeting_bonus = 6.0 if STRONG_GREETING_RE.search(text) else 3.5
+            greeting_bonus += (1.0 - (start / max(source_duration, 1.0))) * 2.0
         center = (start + end) / 2
         center_preference = 1 - abs(center - source_duration / 2) / max(source_duration, 1)
         score = (
@@ -300,6 +378,7 @@ def select_excerpt(
             + play_bonus
             + children_bonus
             + audience_bonus
+            + greeting_bonus
         )
         candidates.append((score, start, end))
     if candidates:
@@ -483,6 +562,7 @@ def _selection_from_source(
     max_duration: float,
     avoid: list[tuple[float, float]] | None = None,
     min_duration: float | None = None,
+    prefer_greeting: bool = False,
 ) -> dict[str, Any] | None:
     metadata = source.get("metadata", {})
     source_duration = max(0.0, float(metadata.get("duration", 0)))
@@ -494,7 +574,12 @@ def _selection_from_source(
     requested = min(hard_cap, source_duration, max(0.0, max_duration))
     if requested < 0.35:
         return None
-    start, end = select_excerpt(source, requested, avoid=avoid)
+    start, end = select_excerpt(
+        source,
+        requested,
+        avoid=avoid,
+        prefer_greeting=prefer_greeting,
+    )
     duration = end - start
     if duration < 0.35:
         return None
@@ -522,17 +607,38 @@ def _selection_from_source(
         "_setting": infer_setting(source),
         "_score": _clip_score(source),
         "_playful": is_playful_source(source),
+        "_greeting": is_greeting_source(source),
         "_kids_hooks": hooks,
     }
 
 
-def _pick_playful_open_source(pool: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _pick_open_source(pool: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Prefer early greeting / start-of-day footage; playful cold-open is a fallback."""
     if not pool:
         return None
-    early_count = max(1, int(len(pool) * 0.25 + 0.999))
-    early = pool[:early_count]
-    playful = [clip for clip in early if is_playful_source(clip)]
-    return playful[0] if playful else None
+    usable = [
+        clip
+        for clip in pool
+        if float(clip.get("metadata", {}).get("duration", 0) or 0) >= MIN_OPEN_CTA_SEC
+    ]
+    if not usable:
+        return None
+    # Search a wider early window for spoken greetings so car-hello beats are not missed.
+    greet_count = max(1, int(len(usable) * 0.40 + 0.999))
+    greet_window = usable[:greet_count]
+    strong = [clip for clip in greet_window if is_strong_greeting_source(clip)]
+    if strong:
+        return strong[0]
+    greeting = [clip for clip in greet_window if is_greeting_source(clip)]
+    if greeting:
+        return greeting[0]
+    # Playful cold-open stays in the first quartile so mid-morning play does not
+    # become the open and lock out earlier transit / setting coverage.
+    play_count = max(1, int(len(usable) * 0.25 + 0.999))
+    playful = [clip for clip in usable[:play_count] if is_playful_source(clip)]
+    if playful:
+        return playful[0]
+    return None
 
 
 def _cta_close_candidates(
@@ -646,19 +752,23 @@ def build_balanced_fallback_plan(
         setting_duration[setting] += duration
         total += duration
 
-    # Reserve playful cold-open first; CTA is chosen after the middle so it cannot
-    # starve the body by locking an early upper capture bound.
-    open_source = _pick_playful_open_source(pool)
+    # Reserve greeting / start-of-day open first; CTA is chosen after the middle so it
+    # cannot starve the body by locking an early upper capture bound.
+    open_source = _pick_open_source(pool)
     if open_source is not None:
         candidate = _selection_from_source(
             open_source,
             max_duration=OPEN_CTA_BEAT_SEC,
             min_duration=MIN_OPEN_CTA_SEC,
+            prefer_greeting=True,
         )
         if candidate is not None:
             candidate["_role"] = "open"
             note = str(candidate.get("note", "")).strip()
-            candidate["note"] = f"{note} Playful cold-open.".strip()
+            if candidate.get("_greeting") or is_strong_greeting_source(open_source):
+                candidate["note"] = f"{note} Greeting / start-of-day open.".strip()
+            else:
+                candidate["note"] = f"{note} Playful cold-open.".strip()
             open_selection = candidate
             _commit(candidate)
 
@@ -902,11 +1012,15 @@ def build_balanced_fallback_plan(
         item.pop("_capture_time", None)
         item.pop("_score", None)
         item.pop("_playful", None)
+        is_greeting_open = bool(item.pop("_greeting", False))
         hooks = [str(h) for h in (item.pop("_kids_hooks", []) or []) if str(h).strip()]
         setting = str(item.pop("_setting", "other"))
         item["_section_setting"] = setting
         item["_section_hooks"] = hooks
         if role == "open":
+            item["_greeting_open"] = is_greeting_open or (
+                "Greeting / start-of-day open" in str(item.get("note", ""))
+            )
             open_clips.append(item)
         elif role == "cta":
             cta_clips.append(item)
@@ -935,14 +1049,18 @@ def build_balanced_fallback_plan(
         return {"section": section, "description": description, "clips": clips}
 
     if open_clips:
+        greeting_open = False
         for item in open_clips:
             item.pop("_section_setting", None)
             item.pop("_section_hooks", None)
+            greeting_open = greeting_open or bool(item.pop("_greeting_open", False))
         structure.append(
             {
-                "section": "Playful open",
+                "section": "Greeting open" if greeting_open else "Playful open",
                 "description": (
-                    "Kids-audience cold-open: early fun / fooling-around with children when possible."
+                    "Start-of-day greeting / departure from early real footage."
+                    if greeting_open
+                    else "Kids-audience cold-open: early fun / fooling-around with children when possible."
                 ),
                 "clips": open_clips,
             }
@@ -988,8 +1106,8 @@ def build_balanced_fallback_plan(
             "Priority 2: kid-interesting activity categories (play structures, animals/creatures, "
             "water play, treats, discovery/wonder, rides) — never place hardcodes. "
             "Keep setting diversity within one capture day (including late-day evening beats), "
-            "preserve complete play narration, and bookend with playful open plus a fuller CTA/"
-            "goodbye close when footage allows."
+            "preserve complete play narration, and bookend with a greeting/start-of-day open "
+            "(or playful open if no greeting) plus a fuller CTA/goodbye close when footage allows."
             f"{day_note}"
         ),
         "planning_day": primary_day,
@@ -1101,7 +1219,9 @@ Rules:
 - Kids fooling-around / play / laugh narration is high value — keep complete exchanges
   (often 20-55s). Do not strip playful speech just to hit pacing. Long play takes may
   contribute 2-3 distinct non-overlapping beats instead of one tiny slice.
-- Open with a short playful cold-open (about 8-14s) from early real footage when available.
+- Open with a short greeting / start-of-day beat (about 12-22s) from early real footage
+  when available (assalamualaikum / hai / pagi ini / mau kemana / arrival). Fall back to
+  a playful cold-open only if no greeting exists.
 - Close with a CTA-style goodbye beat (smile / thanks / bye / wave / night pulang,
   about 12-24s) from late real footage. Do not invent clips. Keep capture_time order
   (open earliest, CTA latest).
