@@ -28,8 +28,13 @@ Use the `ve` CLI. Do not recreate its media logic in ad-hoc scripts.
 - Never bypass the plan-hash approval gate.
 - Never cut through a spoken word; retain validator corrections.
 - Keep one primary capture day. Default `story_arc: scene_energy` uses contiguous
-  day scenes in time order, ranking best→better kids energy inside each scene
-  (morning car ≠ night car). Alternatives: `kids_energy` or `chronological`.
+  same-setting scenes in time order, ranking best→better kids energy inside each scene
+  (morning car ≠ night car). Alternatives via episode `project.yaml`: `kids_energy` or
+  `chronological`.
+- Framework defaults live in code/`DEFAULT_CONFIG`. Episode-specific taste from review
+  feedback (duration, language, captions, arc, SFX density, forced includes/excludes)
+  belongs in that episode's `project.yaml` or `work/edit_plan.json` — do not hardcode
+  place names or one family's day into the planner.
 - Prefer original footage over duplicate `Copy` files.
 - Do not run faster-whisper and Qwen concurrently on the 8 GB GPU.
 - Use local audio packs only (`cc0`, `public_domain`, `youtube_audio_library`, `pixabay`, `original`, `user_provided`).
