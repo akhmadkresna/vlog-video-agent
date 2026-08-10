@@ -69,6 +69,24 @@ STRONG_GREETING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Destination arrival narration — its own story beat after open (not a silent car pad).
+ARRIVAL_RE = re.compile(
+    r"("
+    r"\budah\s+sampai\b|\bsudah\s+sampai\b|\bwe\s+arrived\b|\barrived\s+at\b|"
+    r"\bsampai\s+di\b|\bsampai\s+ini\b|\bkita\s+sekarang\s+udah\s+sampai\b|"
+    r"\bkita\s+udah\s+sampai\b|\bok(?:e)?\s+kita\s+udah\s+sampai\b"
+    r")",
+    re.IGNORECASE,
+)
+DEPARTURE_OPEN_RE = re.compile(
+    r"("
+    r"assalamu'?alaikum|assalamualaikum|"
+    r"\bselamat\s+pagi\b|\bpagi\s+ini\b|\bmau\s+kemana\b|"
+    r"\bberangkat\b|\blet'?s\s+go\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def _source_text(source: dict[str, Any]) -> str:
     visual = source.get("visual", {})
@@ -167,6 +185,29 @@ def is_strong_greeting_source(source: dict[str, Any]) -> bool:
     return bool(STRONG_GREETING_RE.search(_audio_text(source)))
 
 
+def is_arrival_source(source: dict[str, Any]) -> bool:
+    """Spoken destination arrival ('udah sampai…') — narrative beat, not transit pad."""
+    return bool(ARRIVAL_RE.search(_audio_text(source)))
+
+
+def is_departure_open_source(source: dict[str, Any]) -> bool:
+    """Start-of-day departure / hello — preferred for the open bookend over arrival."""
+    return bool(DEPARTURE_OPEN_RE.search(_audio_text(source)))
+
+
+def is_speechless_transit_pad(source: dict[str, Any]) -> bool:
+    """Vehicle/street crumbs with no usable speech — demote unless arrival narration."""
+    setting = infer_setting(source)
+    if setting not in {"vehicle", "street"}:
+        return False
+    if is_arrival_source(source):
+        return False
+    text = " ".join(_audio_text(source).split())
+    # Truly empty / near-empty pads (e.g. silent car close-up). Short but real
+    # lines like "macet ya" still count as spoken transit.
+    return len(text) < 8
+
+
 def _max_selection_for_source(source: dict[str, Any]) -> float:
     if is_playful_source(source) or source_has_strong_wow(source):
         return PLAY_MAX_SELECTION_SEC
@@ -246,6 +287,7 @@ def select_excerpt(
     *,
     avoid: list[tuple[float, float]] | None = None,
     prefer_greeting: bool = False,
+    prefer_arrival: bool = False,
 ) -> tuple[float, float]:
     source_duration = max(0.0, float(source.get("metadata", {}).get("duration", 0)))
     max_duration = min(max(0.0, max_duration), source_duration)
@@ -265,12 +307,16 @@ def select_excerpt(
         if isinstance(segment, dict)
     ]
 
-    # Greeting opens should lock onto the spoken hello near the start of the take.
-    if prefer_greeting and segments:
-        greeting_hits: list[tuple[float, float, float]] = []
+    def _lock_speech_pattern(
+        pattern: re.Pattern[str],
+        *,
+        strength_pattern: re.Pattern[str] | None = None,
+        min_span: float = MIN_OPEN_CTA_SEC,
+    ) -> tuple[float, float] | None:
+        hits: list[tuple[float, float, float]] = []
         for segment in segments:
             text = str(segment.get("text", ""))
-            if not GREETING_RE.search(text):
+            if not pattern.search(text):
                 continue
             try:
                 start = max(0.0, float(segment.get("start", 0)) - 0.08)
@@ -284,25 +330,37 @@ def select_excerpt(
             )
             if end - start < 0.35 or overlaps_avoided(start, end):
                 continue
-            strength = 2.0 if STRONG_GREETING_RE.search(text) else 1.0
+            strength = 2.0 if strength_pattern and strength_pattern.search(text) else 1.0
             earliness = 1.0 - (start / max(source_duration, 1.0))
-            greeting_hits.append((strength + earliness, start, end))
-        if greeting_hits:
-            _, start, end = max(greeting_hits, key=lambda item: item[0])
-            # Grow enough to clear the open bookend minimum when the take has more speech.
-            if (
-                end - start + 1e-6 < MIN_OPEN_CTA_SEC
-                and source_duration + 1e-6 >= MIN_OPEN_CTA_SEC
-            ):
-                start, end = _complete_exchange(
-                    segments,
-                    start=start,
-                    max_duration=max(max_duration, MIN_OPEN_CTA_SEC + 2.0),
-                    source_duration=source_duration,
-                )
-                if end - start + 1e-6 < MIN_OPEN_CTA_SEC:
-                    end = min(source_duration, start + min(max_duration, MIN_OPEN_CTA_SEC))
-            return round(start, 3), round(min(end, start + max_duration), 3)
+            hits.append((strength + earliness, start, end))
+        if not hits:
+            return None
+        _, start, end = max(hits, key=lambda item: item[0])
+        if end - start + 1e-6 < min_span and source_duration + 1e-6 >= min_span:
+            start, end = _complete_exchange(
+                segments,
+                start=start,
+                max_duration=max(max_duration, min_span + 2.0),
+                source_duration=source_duration,
+            )
+            if end - start + 1e-6 < min_span:
+                end = min(source_duration, start + min(max_duration, min_span))
+        return round(start, 3), round(min(end, start + max_duration), 3)
+
+    # Arrival beats lock onto "udah sampai…" before generic wow / ranges.
+    if prefer_arrival and segments:
+        locked = _lock_speech_pattern(ARRIVAL_RE, strength_pattern=ARRIVAL_RE)
+        if locked is not None:
+            return locked
+
+    # Greeting opens should lock onto the spoken hello near the start of the take.
+    if prefer_greeting and segments:
+        locked = _lock_speech_pattern(
+            GREETING_RE,
+            strength_pattern=STRONG_GREETING_RE,
+        )
+        if locked is not None:
+            return locked
 
     # Prefer kids-interest payoff spans (animal wow, reactions) over walk-up setup.
     wow_pick = best_wow_span(
@@ -712,6 +770,7 @@ def _selection_from_source(
     avoid: list[tuple[float, float]] | None = None,
     min_duration: float | None = None,
     prefer_greeting: bool = False,
+    prefer_arrival: bool = False,
 ) -> dict[str, Any] | None:
     metadata = source.get("metadata", {})
     source_duration = max(0.0, float(metadata.get("duration", 0)))
@@ -728,6 +787,7 @@ def _selection_from_source(
         requested,
         avoid=avoid,
         prefer_greeting=prefer_greeting,
+        prefer_arrival=prefer_arrival,
     )
     duration = end - start
     if duration < 0.35:
@@ -759,14 +819,15 @@ def _selection_from_source(
         "_score": _clip_score(source),
         "_playful": is_playful_source(source),
         "_greeting": is_greeting_source(source),
+        "_arrival": is_arrival_source(source),
         "_energy": kids_energy_score(source),
-        "_peak": is_peak_kids_source(source),
+        "_peak": is_peak_kids_source(source) or is_arrival_source(source),
         "_kids_hooks": hooks,
     }
 
 
 def _pick_open_source(pool: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Prefer early greeting / start-of-day footage; playful cold-open is a fallback."""
+    """Prefer early departure greeting; keep arrival for its own beat when possible."""
     if not pool:
         return None
     usable = [
@@ -779,6 +840,13 @@ def _pick_open_source(pool: list[dict[str, Any]]) -> dict[str, Any] | None:
     # Search a wider early window for spoken greetings so car-hello beats are not missed.
     greet_count = max(1, int(len(usable) * 0.40 + 0.999))
     greet_window = usable[:greet_count]
+    # Prefer departure/hello over "udah sampai" so arrival can be section 2.
+    depart = [clip for clip in greet_window if is_departure_open_source(clip)]
+    strong_depart = [clip for clip in depart if is_strong_greeting_source(clip)]
+    if strong_depart:
+        return strong_depart[0]
+    if depart:
+        return depart[0]
     strong = [clip for clip in greet_window if is_strong_greeting_source(clip)]
     if strong:
         return strong[0]
@@ -792,6 +860,39 @@ def _pick_open_source(pool: list[dict[str, Any]]) -> dict[str, Any] | None:
     if playful:
         return playful[0]
     return None
+
+
+def _pick_arrival_source(
+    pool: list[dict[str, Any]],
+    *,
+    not_before_capture_time: str = "",
+    exclude_files: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """First spoken destination arrival after the open bookend."""
+    excluded = exclude_files or set()
+    candidates: list[dict[str, Any]] = []
+    for clip in pool:
+        filename = str(clip.get("metadata", {}).get("filename", ""))
+        if filename in excluded:
+            continue
+        if float(clip.get("metadata", {}).get("duration", 0) or 0) < MIN_OPEN_CTA_SEC:
+            continue
+        if not is_arrival_source(clip):
+            continue
+        capture = _capture_time(clip) or ""
+        if not_before_capture_time and capture and capture < not_before_capture_time:
+            continue
+        candidates.append(clip)
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda clip: (
+            0 if is_strong_greeting_source(clip) else 1,
+            _capture_time(clip) or "9999",
+            str(clip.get("metadata", {}).get("filename", "")),
+        )
+    )
+    return candidates[0]
 
 
 def _cta_close_candidates(
@@ -935,6 +1036,27 @@ def build_balanced_fallback_plan(
             _commit(candidate)
 
     open_time = str(open_selection.get("_capture_time") or "") if open_selection else ""
+    open_file = str(open_selection.get("file") or "") if open_selection else ""
+    arrival_selection: dict[str, Any] | None = None
+    arrival_source = _pick_arrival_source(
+        pool,
+        not_before_capture_time=open_time,
+        exclude_files={open_file} if open_file else set(),
+    )
+    if arrival_source is not None:
+        candidate = _selection_from_source(
+            arrival_source,
+            max_duration=max(OPEN_CTA_BEAT_SEC, 28.0),
+            min_duration=MIN_OPEN_CTA_SEC,
+            prefer_arrival=True,
+        )
+        if candidate is not None and str(candidate.get("subtitle") or "").strip():
+            candidate["_role"] = "arrival"
+            note = str(candidate.get("note", "")).strip()
+            candidate["note"] = f"{note} Destination arrival narration.".strip()
+            arrival_selection = candidate
+            _commit(candidate)
+
     # Hold budget for the eventual CTA close.
     cta_reserve = OPEN_CTA_BEAT_SEC
     middle_cap = max(0.0, desired_total - cta_reserve)
@@ -1024,6 +1146,7 @@ def build_balanced_fallback_plan(
             if infer_setting(clip) == setting
             and str(clip.get("metadata", {}).get("filename", "")) not in selected_files
             and _in_middle_window(clip)
+            and not is_speechless_transit_pad(clip)
         ]
         if not candidates:
             continue
@@ -1033,6 +1156,7 @@ def build_balanced_fallback_plan(
             arc == "scene_energy"
             and setting not in late_settings
             and not is_peak_kids_source(candidates[0])
+            and not is_arrival_source(candidates[0])
         ):
             continue
         reserve_limit = 3 if setting in late_settings else 1
@@ -1054,8 +1178,12 @@ def build_balanced_fallback_plan(
     # scene_energy: walk the day in capture order (contiguous scenes later).
     # kids_energy: global peak-first. chronological: plain capture walk.
     def _eligible_middle(source: dict[str, Any]) -> bool:
+        if is_speechless_transit_pad(source):
+            return False
         if is_adult_meal_focus(source) and _clip_score(source) < 0.45:
             return False
+        if is_arrival_source(source):
+            return True
         if source_has_children(source):
             return _clip_score(source) >= 0.28
         return _clip_score(source) >= 0.35
@@ -1078,8 +1206,13 @@ def build_balanced_fallback_plan(
             if item.get("_role") == "middle" and not item.get("_peak", True)
         )
         low_pool = sorted(
-            [clip for clip in sources if is_low_activity_source(clip)],
+            [
+                clip
+                for clip in sources
+                if is_low_activity_source(clip) and not is_speechless_transit_pad(clip)
+            ],
             key=lambda clip: (
+                0 if is_arrival_source(clip) else 1,
                 _capture_time(clip) or "9999",
                 str(clip.get("metadata", {}).get("filename", "")),
             ),
@@ -1185,10 +1318,16 @@ def build_balanced_fallback_plan(
             )
         )
     else:
-        # Keep open earliest / CTA latest; middle is reordered by arc rules later.
+        # Keep open earliest / arrival next / CTA latest; middle reordered later.
         selected.sort(
             key=lambda clip: (
-                0 if clip.get("_role") == "open" else 1 if clip.get("_role") == "middle" else 2,
+                0
+                if clip.get("_role") == "open"
+                else 1
+                if clip.get("_role") == "arrival"
+                else 2
+                if clip.get("_role") == "middle"
+                else 3,
                 str(clip.get("_capture_time") or "9999"),
                 float(clip.get("start", 0)),
                 str(clip.get("file", "")),
@@ -1252,6 +1391,7 @@ def build_balanced_fallback_plan(
     # If CTA ended up not last after chrono sort (same-time edge), keep role tags for sections.
     structure: list[dict[str, Any]] = []
     open_clips: list[dict[str, Any]] = []
+    arrival_clips: list[dict[str, Any]] = []
     cta_clips: list[dict[str, Any]] = []
     middle_items: list[dict[str, Any]] = []
     for item in selected:
@@ -1259,6 +1399,7 @@ def build_balanced_fallback_plan(
         item.pop("_score", None)
         item.pop("_playful", None)
         is_greeting_open = bool(item.pop("_greeting", False))
+        is_arrival = bool(item.pop("_arrival", False))
         hooks = [str(h) for h in (item.pop("_kids_hooks", []) or []) if str(h).strip()]
         setting = str(item.pop("_setting", "other"))
         item["_section_setting"] = setting
@@ -1271,6 +1412,14 @@ def build_balanced_fallback_plan(
                 "Greeting / start-of-day open" in str(item.get("note", ""))
             )
             open_clips.append(item)
+        elif role == "arrival":
+            item.pop("_capture_time", None)
+            item.pop("_energy", None)
+            item.pop("_peak", None)
+            item["_arrival_beat"] = is_arrival or (
+                "Destination arrival" in str(item.get("note", ""))
+            )
+            arrival_clips.append(item)
         elif role == "cta":
             item.pop("_capture_time", None)
             item.pop("_energy", None)
@@ -1387,6 +1536,21 @@ def build_balanced_fallback_plan(
                     else "Kids-audience cold-open: early fun / fooling-around with children when possible."
                 ),
                 "clips": open_clips,
+            }
+        )
+
+    if arrival_clips:
+        for item in arrival_clips:
+            item.pop("_section_setting", None)
+            item.pop("_section_hooks", None)
+            item.pop("_arrival_beat", None)
+        structure.append(
+            {
+                "section": "Arrival",
+                "description": (
+                    "Spoken destination arrival ('udah sampai…') — place the day before play peaks."
+                ),
+                "clips": arrival_clips,
             }
         )
 

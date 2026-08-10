@@ -46,3 +46,5 @@ Use the `ve` CLI. Do not recreate its media logic in ad-hoc scripts.
   Pin `language: id` for Indo ASR when needed.
 - Kids-interest wow scoring prefers payoff moments (animals, reactions) over setup
   walk-ups. Review wow + per-frame narration on the storyboard after `ve preview`.
+- Prefer a spoken Arrival beat (`udah sampai…`) after Greeting open; demote speechless
+  vehicle/street crumbs that are not arrival narration.

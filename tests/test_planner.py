@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
@@ -412,7 +412,7 @@ def test_setting_order_cannot_override_capture_chronology() -> None:
     assert plan["structure"][0]["section"].startswith("Home") or plan[
         "structure"
     ][0]["section"] == "Playful open"
-    assert plan["structure"][-1]["section"] in {"CTA close", "Outdoor — Best moments"}
+    assert plan["structure"][-1]["section"] in {"CTA close", "Outdoor â€” Best moments"}
 
 
 def test_excerpt_ignores_full_range_and_selects_interesting_speech_window() -> None:
@@ -507,7 +507,7 @@ def test_kids_audience_categories_are_activity_types_not_place_hardcodes() -> No
     assert "animals" in cats
     assert "water_play" in cats or "play_structure" in cats
     assert kids_audience_interest(text) >= 0.5
-    # No dedicated fish-pond category — fish maps to animals.
+    # No dedicated fish-pond category â€” fish maps to animals.
     assert "fish_pond" not in cats
     assert "animals" in kids_audience_categories("kids point at fish in the pond")
 
@@ -981,3 +981,112 @@ def test_balanced_plan_prefers_greeting_open_over_later_play() -> None:
     assert "Greeting / start-of-day open" in open_clip["note"]
     assert "Assalamualaikum" in open_clip["subtitle"] or "pagi ini" in open_clip["subtitle"]
     assert fixed["structure"][-1]["section"] == "CTA close"
+
+
+def test_balanced_plan_inserts_arrival_and_skips_speechless_vehicle() -> None:
+    from vlog_editor.planner import (
+        build_balanced_fallback_plan,
+        is_arrival_source,
+        is_speechless_transit_pad,
+    )
+
+    greeting = _clip(
+        "car-hello.mov",
+        30,
+        transcript="Hai Assalamualaikum kita pagi ini mau kemana",
+        setting="vehicle",
+        capture_time="2026-08-01T01:00:00.000000Z",
+    )
+    greeting["visual"]["summary"] = "family of four in a car discussing the day"
+    greeting["visual"]["subjects"] = ["family", "car", "children"]
+    greeting["audio"]["segments"] = [
+        {
+            "start": 0.3,
+            "end": 12.0,
+            "text": "Hai Assalamualaikum kita pagi ini mau kemana",
+        }
+    ]
+
+    silent_car = _clip(
+        "silent-car.mov",
+        8,
+        transcript="",
+        setting="vehicle",
+        capture_time="2026-08-01T01:10:00.000000Z",
+    )
+    silent_car["visual"]["summary"] = "low angle face partially visible inside a car"
+    silent_car["visual"]["subjects"] = ["person", "car"]
+    silent_car["audio"]["segments"] = []
+    silent_car["audio"]["text"] = ""
+
+    arrival = _clip(
+        "arrived.mov",
+        60,
+        transcript="Hai Oke kita sekarang udah sampai di leker ada kolam renangnya",
+        setting="attraction",
+        capture_time="2026-08-01T02:00:00.000000Z",
+    )
+    arrival["visual"]["summary"] = "family arrives at outdoor resort with pools"
+    arrival["visual"]["subjects"] = ["people", "cars", "pools"]
+    arrival["audio"]["segments"] = [
+        {
+            "start": 0.0,
+            "end": 8.0,
+            "text": "Hai Oke kita sekarang udah sampai di leker",
+        },
+        {
+            "start": 8.0,
+            "end": 20.0,
+            "text": "leker itu dia restoran ada kolam renangnya gitu",
+        },
+    ]
+    arrival["audio"]["text"] = (
+        "Hai Oke kita sekarang udah sampai di leker leker itu dia restoran ada kolam renangnya"
+    )
+
+    playground = _clip(
+        "play.mov",
+        90,
+        transcript="anak bermain di playground dan ketawa seru",
+        setting="outdoor",
+        capture_time="2026-08-01T03:00:00.000000Z",
+    )
+    playground["visual"]["summary"] = "kids playing on playground equipment"
+    playground["visual"]["subjects"] = ["children", "playground"]
+
+    bye = _clip(
+        "bye.mov",
+        30,
+        transcript="dadah ya makasih see you",
+        setting="outdoor",
+        capture_time="2026-08-01T08:00:00.000000Z",
+    )
+    bye["visual"]["summary"] = "child smiles and waves goodbye"
+    bye["visual"]["subjects"] = ["child"]
+
+    assert is_arrival_source(arrival)
+    assert is_speechless_transit_pad(silent_car)
+    assert not is_speechless_transit_pad(greeting)
+
+    analysis = {"clips": [greeting, silent_car, arrival, playground, bye]}
+    plan = build_balanced_fallback_plan(
+        analysis, 200, title="Family day", story_arc="scene_energy"
+    )
+    fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=200)
+    errors = [error for error in errors if "too far from target" not in error]
+    assert errors == []
+    sections = [section["section"] for section in fixed["structure"]]
+    assert sections[0] == "Greeting open"
+    assert "Arrival" in sections
+    arrival_idx = sections.index("Arrival")
+    assert arrival_idx == 1
+    arrival_clip = fixed["structure"][arrival_idx]["clips"][0]
+    assert arrival_clip["file"] == "arrived.mov"
+    assert "sampai" in arrival_clip["subtitle"].lower()
+    assert "Destination arrival" in arrival_clip["note"]
+    planned_files = {
+        clip["file"]
+        for section in fixed["structure"]
+        for clip in section["clips"]
+    }
+    assert "silent-car.mov" not in planned_files
