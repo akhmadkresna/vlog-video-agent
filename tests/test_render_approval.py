@@ -119,5 +119,6 @@ def test_bgm_beds_use_adelay_windows(
     assert "adelay=3000|3000" in filters
     assert "amix=inputs=2:duration=longest:normalize=0,apad=whole_dur=" in filters
     assert "[music]" in filters
-    # Beds must not each pad to the full timeline (RAM blow-up on long edits).
-    assert filters.count("apad=whole_dur=") == 1
+    # Individual beds delay only; full-timeline pad happens once on the mix.
+    assert "adelay=0|0,apad=whole_dur=" not in filters
+    assert "adelay=3000|3000,apad=whole_dur=" not in filters

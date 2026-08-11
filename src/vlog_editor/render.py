@@ -148,17 +148,20 @@ def build_render_command(
                 f"[{input_index}:a]aresample=48000,"
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
                 f"volume={gain:.3f},"
-                f"adelay={delay_ms}|{delay_ms},"
-                f"apad=whole_dur={total:.3f},atrim=duration={total:.3f},"
-                f"asetpts=PTS-STARTPTS[{label}]"
+                f"adelay={delay_ms}|{delay_ms}[{label}]"
             )
             sfx_labels.append(f"[{label}]")
         if len(sfx_labels) == 1:
-            filters.append(f"{sfx_labels[0]}anull[sfxmix]")
+            filters.append(
+                f"{sfx_labels[0]}apad=whole_dur={total:.3f},atrim=duration={total:.3f},"
+                "asetpts=PTS-STARTPTS[sfxmix]"
+            )
         else:
             filters.append(
                 "".join(sfx_labels)
-                + f"amix=inputs={len(sfx_labels)}:duration=longest:normalize=0[sfxmix]"
+                + f"amix=inputs={len(sfx_labels)}:duration=longest:normalize=0,"
+                f"apad=whole_dur={total:.3f},atrim=duration={total:.3f},"
+                "asetpts=PTS-STARTPTS[sfxmix]"
             )
         filters.append(
             "[acat][sfxmix]amix=inputs=2:duration=first:normalize=0[dialogue_fx]"
