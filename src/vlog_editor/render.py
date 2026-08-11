@@ -76,13 +76,20 @@ def build_render_command(
         candidate = Path(str(bgm_config["file"]))
         bgm_path = candidate if candidate.is_absolute() else episode.root / candidate
     bgm_input_paths: list[Path] = []
+    bgm_segment_input_indexes: list[int] = []
     if bgm_segments:
+        # One ffmpeg input per unique bed file (not per segment) to cut RAM/handles.
+        unique_index: dict[Path, int] = {}
         for segment in bgm_segments:
             relative = str(segment.get("file") or (bgm_payload or {}).get("file") or "")
             path = _resolve_audio_path(episode, relative)
             if not path.is_file():
                 raise FileNotFoundError(f"BGM bed file missing: {path}")
-            bgm_input_paths.append(path)
+            resolved = path.resolve()
+            if resolved not in unique_index:
+                unique_index[resolved] = len(bgm_input_paths)
+                bgm_input_paths.append(path)
+            bgm_segment_input_indexes.append(unique_index[resolved])
     elif bgm_path is not None:
         if not bgm_path.is_file():
             raise FileNotFoundError(f"Configured BGM does not exist: {bgm_path}")
@@ -170,7 +177,7 @@ def build_render_command(
         if bgm_segments:
             bed_labels: list[str] = []
             for offset, segment in enumerate(bgm_segments):
-                input_index = next_input + offset
+                input_index = next_input + bgm_segment_input_indexes[offset]
                 start = float(segment["start_sec"])
                 end = float(segment["end_sec"])
                 seg_dur = max(0.05, end - start)
@@ -179,6 +186,8 @@ def build_render_command(
                 delay_ms = max(0, round(start * 1000))
                 volume = float(segment.get("volume", bgm_volume))
                 label = f"bed{offset}"
+                # Delay only — pad once after amix so 25 beds don't each hold a
+                # full-timeline float buffer (that blew multi-GB RAM on long edits).
                 filters.append(
                     f"[{input_index}:a]aresample=48000,"
                     "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
@@ -186,17 +195,20 @@ def build_render_command(
                     f"afade=t=in:st=0:d={fade:.3f},"
                     f"afade=t=out:st={fade_out:.3f}:d={fade:.3f},"
                     f"volume={volume:.3f},"
-                    f"adelay={delay_ms}|{delay_ms},"
-                    f"apad=whole_dur={total:.3f},atrim=duration={total:.3f},"
-                    f"asetpts=PTS-STARTPTS[{label}]"
+                    f"adelay={delay_ms}|{delay_ms}[{label}]"
                 )
                 bed_labels.append(f"[{label}]")
             if len(bed_labels) == 1:
-                filters.append(f"{bed_labels[0]}anull[music]")
+                filters.append(
+                    f"{bed_labels[0]}apad=whole_dur={total:.3f},atrim=duration={total:.3f},"
+                    "asetpts=PTS-STARTPTS[music]"
+                )
             else:
                 filters.append(
                     "".join(bed_labels)
-                    + f"amix=inputs={len(bed_labels)}:duration=longest:normalize=0[music]"
+                    + f"amix=inputs={len(bed_labels)}:duration=longest:normalize=0,"
+                    f"apad=whole_dur={total:.3f},atrim=duration={total:.3f},"
+                    "asetpts=PTS-STARTPTS[music]"
                 )
         else:
             bgm_index = next_input

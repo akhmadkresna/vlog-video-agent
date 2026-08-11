@@ -117,4 +117,7 @@ def test_bgm_beds_use_adelay_windows(
     _, filters = build_render_command(episode, plan, episode.output / "final.mp4")
     assert "adelay=0|0" in filters
     assert "adelay=3000|3000" in filters
-    assert "amix=inputs=2:duration=longest:normalize=0[music]" in filters
+    assert "amix=inputs=2:duration=longest:normalize=0,apad=whole_dur=" in filters
+    assert "[music]" in filters
+    # Beds must not each pad to the full timeline (RAM blow-up on long edits).
+    assert filters.count("apad=whole_dur=") == 1
