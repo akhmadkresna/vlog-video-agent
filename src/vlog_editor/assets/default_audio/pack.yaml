@@ -9,17 +9,17 @@ bgm_candidates:
     license: pixabay
     attribution: null
     source_url: https://pixabay.com/
-    gain: 0.12
+    gain: 0.24
   - file: bgm/maksymmalko-funny-kids-video-322163.mp3
     license: pixabay
     attribution: null
     source_url: https://pixabay.com/
-    gain: 0.12
+    gain: 0.24
   - file: bgm/sigmamusicart-kids-happy-background-music-401734.mp3
     license: pixabay
     attribution: null
     source_url: https://pixabay.com/
-    gain: 0.12
+    gain: 0.24
 sfx:
   boing:
     gain: 0.50

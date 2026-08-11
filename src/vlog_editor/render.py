@@ -63,7 +63,7 @@ def build_render_command(
     bgm_payload = plan.get("bgm") if isinstance(plan.get("bgm"), dict) else None
     bgm_config = episode.config.get("bgm", {})
     bgm_path = None
-    bgm_volume = float(bgm_config.get("volume", 0.12))
+    bgm_volume = float(bgm_config.get("volume", 0.24))
     bgm_segments: list[dict[str, Any]] = []
     if bgm_payload and (bgm_payload.get("file") or bgm_payload.get("segments")):
         if bgm_payload.get("file"):
@@ -210,8 +210,9 @@ def build_render_command(
             [
                 f"{dialogue_label}asplit=2[original][sidechain]",
                 (
-                    "[music][sidechain]sidechaincompress=threshold=0.015:ratio=12:"
-                    "attack=8:release=220[ducked]"
+                    # Soft duck under speech — keep beds hearable (old 0.015/12 crushed music).
+                    "[music][sidechain]sidechaincompress=threshold=0.06:ratio=3:"
+                    "attack=25:release=450:makeup=1.4[ducked]"
                 ),
                 "[original][ducked]amix=inputs=2:duration=first:normalize=0[aout]",
             ]

@@ -40,7 +40,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "bgm": {
         "file": None,
-        "volume": 0.12,
+        "volume": 0.24,
         # beds = intro / play / light B-roll / outro (default). full = whole edit.
         "mode": "beds",
     },

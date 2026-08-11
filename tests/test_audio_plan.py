@@ -357,11 +357,11 @@ def test_bgm_beds_include_playing_and_skip_full_coverage(tmp_path: Path) -> None
         if "playing / fooling around" in str(seg.get("reason", ""))
     ]
     assert play_spans
-    assert max(play_spans) <= 18.0 + 1e-6
+    assert max(play_spans) <= 40.0 + 1e-6
     coverage = sum(
         float(seg["end_sec"]) - float(seg["start_sec"]) for seg in bgm["segments"]
     )
-    assert coverage <= float(planned["duration_sec"]) * 0.5 + 1e-6
+    assert coverage <= float(planned["duration_sec"]) * 0.65 + 1e-6
     files = [str(seg.get("file", "")) for seg in bgm["segments"]]
     assert all(files)
     if len(files) >= 2 and len({Path(f).name for f in files}) >= 2:
