@@ -76,8 +76,8 @@ def test_bgm_graph_splits_original_audio_before_ducking(
     assert "dynaudnorm=f=150:g=12:p=0.9" in filters
     assert "[dialogue_norm]asplit=2[original][sidechain]" in filters
     assert (
-        "[music][sidechain]sidechaincompress=threshold=0.06:ratio=3:"
-        "attack=25:release=450:makeup=1.4[ducked]"
+        "[music][sidechain]sidechaincompress=threshold=0.1:ratio=2:"
+        "attack=40:release=600:makeup=2.0:mix=0.55[ducked]"
     ) in filters
 
 

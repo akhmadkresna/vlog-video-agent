@@ -417,7 +417,7 @@ def _plan_bgm_segments(
                 {
                     "start_sec": bed_start,
                     "end_sec": bed_end,
-                    "volume": min(0.30, base_volume + 0.04),
+                    "volume": min(1.05, base_volume + 0.08),
                     "reason": "playing / fooling around",
                 }
             )
@@ -430,7 +430,7 @@ def _plan_bgm_segments(
                 {
                     "start_sec": bed_start,
                     "end_sec": bed_end,
-                    "volume": min(0.28, base_volume + 0.03),
+                    "volume": min(1.0, base_volume + 0.06),
                     "reason": "fun moment",
                 }
             )
@@ -464,7 +464,7 @@ def _plan_bgm_segments(
             {
                 "start_sec": 0.0,
                 "end_sec": min(INTRO_SEC, total),
-                "volume": min(0.32, base_volume + 0.08),
+                "volume": min(1.1, base_volume + 0.12),
                 "reason": "intro",
             }
         )
@@ -474,7 +474,7 @@ def _plan_bgm_segments(
             {
                 "start_sec": max(0.0, total - OUTRO_SEC),
                 "end_sec": total,
-                "volume": min(0.30, base_volume + 0.06),
+                "volume": min(1.05, base_volume + 0.1),
                 "reason": "outro",
             }
         )
@@ -496,7 +496,7 @@ def _bgm_pool(
 ) -> list[dict[str, Any]]:
     """Resolve usable BGM candidates. Pinned bgm.file uses only that track."""
     configured = bgm_config.get("file")
-    volume = float(bgm_config.get("volume", 0.24))
+    volume = float(bgm_config.get("volume", 0.85))
     if configured:
         relative = str(configured)
         candidate = Path(relative)
@@ -579,7 +579,7 @@ def _resolve_bgm_source(
     primary = pool[0]
     return {
         "file": primary["file"],
-        "volume": float(bgm_config.get("volume", primary.get("volume", 0.24))),
+        "volume": float(bgm_config.get("volume", primary.get("volume", 0.85))),
         "license": primary["license"],
         "attribution": primary.get("attribution"),
         "candidates": pool,
