@@ -54,11 +54,14 @@ Public uploads need an explicit `--privacy public` (or `youtube.privacy: public`
 | `title` | episode `title` | Max 100 characters |
 | `description` | generated | Chapters from the edit plan + Indo hashtags |
 | `tags` | generated | No personal names from ASR |
-| `privacy` | `unlisted` | `private`, `unlisted`, or `public` |
-| `made_for_kids` | `true` | YouTube `selfDeclaredMadeForKids` |
+| `privacy` | `unlisted` | `private`, `unlisted`, or `public`. Kids app needs public. |
+| `made_for_kids` | `true` | Required. Locked when `kids_destination` is on. |
+| `kids_destination` | `true` | Child-facing copy, no URLs, no paid promo |
 | `upload_captions` | `true` | Uploads `output/captions.srt` as Indonesian |
-| `category_id` | `22` | People & Blogs |
+| `category_id` | `24` | Entertainment (not People & Blogs) |
 | `notify_subscribers` | `false` | |
+
+Kids-specific rules: [`docs/youtube-kids.md`](docs/youtube-kids.md).
 
 Override per episode in `project.yaml`:
 

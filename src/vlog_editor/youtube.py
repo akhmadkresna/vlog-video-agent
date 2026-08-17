@@ -15,9 +15,12 @@ YOUTUBE_FORCE_SSL_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
 YOUTUBE_SCOPES = (YOUTUBE_UPLOAD_SCOPE, YOUTUBE_FORCE_SSL_SCOPE)
 
 DEFAULT_YOUTUBE: dict[str, Any] = {
+    # Unlisted until the user asks to publish. YouTube Kids only indexes public MFK videos.
     "privacy": "unlisted",
-    "category_id": "22",
+    # Entertainment, not People & Blogs (22), which reads as a parent vlog.
+    "category_id": "24",
     "made_for_kids": True,
+    "kids_destination": True,
     "notify_subscribers": False,
     "upload_captions": True,
     "title": None,
@@ -25,7 +28,34 @@ DEFAULT_YOUTUBE: dict[str, Any] = {
     "tags": [],
     "playlist_id": None,
     "contains_synthetic_media": False,
+    "paid_promotion": False,
+    "embeddable": True,
 }
+
+_URL_RE = re.compile(r"https?://|www\.|\bbit\.ly\b|\bt\.co\b", re.IGNORECASE)
+_KIDS_TAG_BLOCKLIST = {
+    "cta",
+    "close",
+    "greeting",
+    "subscribe",
+    "merch",
+    "buy",
+    "sale",
+    "promo",
+    "discord",
+    "instagram",
+    "tiktok",
+    "whatsapp",
+}
+_KIDS_SECTION_RULES: tuple[tuple[re.Pattern[str], dict[str, str]], ...] = (
+    (re.compile(r"greeting\s*open|^\s*halo\s*$|^\s*hello\s*$", re.IGNORECASE), {"id": "Halo", "en": "Hello"}),
+    (re.compile(r"cta\s*close|^\s*dadah\s*$|bye-bye|goodbye", re.IGNORECASE), {"id": "Dadah", "en": "Bye-bye"}),
+    (re.compile(r"game|speedstorm|gameplay", re.IGNORECASE), {"id": "Main game", "en": "Game time"}),
+    (re.compile(r"vehicle|car|mobil", re.IGNORECASE), {"id": "Di mobil", "en": "In the car"}),
+    (re.compile(r"outdoor|luar|outside", re.IGNORECASE), {"id": "Main di luar", "en": "Outside"}),
+    (re.compile(r"home|rumah", re.IGNORECASE), {"id": "Di rumah", "en": "At home"}),
+    (re.compile(r"school|sekolah|pickup|jemput", re.IGNORECASE), {"id": "Sekolah", "en": "School"}),
+)
 
 _PRIVACY = {"private", "unlisted", "public"}
 _STOPWORDS = {
@@ -185,7 +215,26 @@ def format_timestamp(seconds: float) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-def chapter_timestamps(plan: dict[str, Any]) -> list[tuple[str, str]]:
+def kids_section_label(label: str, language: str = "id") -> str:
+    text = str(label or "").strip() or "Chapter"
+    lang = "id" if language == "id" else "en"
+    for pattern, names in _KIDS_SECTION_RULES:
+        if pattern.search(text):
+            return names[lang]
+    cleaned = re.sub(r"\s*[—-]\s*.*$", "", text).strip()
+    return cleaned or names_fallback(lang)
+
+
+def names_fallback(language: str) -> str:
+    return "Main" if language == "id" else "Play"
+
+
+def chapter_timestamps(
+    plan: dict[str, Any],
+    *,
+    language: str = "id",
+    kids_destination: bool = True,
+) -> list[tuple[str, str]]:
     cursor = 0.0
     chapters: list[tuple[str, str]] = []
     for section in plan.get("structure", []) or []:
@@ -195,6 +244,8 @@ def chapter_timestamps(plan: dict[str, Any]) -> list[tuple[str, str]]:
         if not clips:
             continue
         label = str(section.get("section") or "Chapter").strip() or "Chapter"
+        if kids_destination:
+            label = kids_section_label(label, language)
         chapters.append((format_timestamp(cursor), label))
         for clip in clips:
             cursor += max(0.0, float(clip.get("end", 0)) - float(clip.get("start", 0)))
@@ -219,27 +270,28 @@ def _slug_tokens(*parts: str) -> list[str]:
 def build_tags(episode: Episode, plan: dict[str, Any], extra: list[str] | None = None) -> list[str]:
     config = youtube_config(episode)
     language = episode_language(episode)
-    made_for_kids = bool(config.get("made_for_kids", True))
+    kids = bool(config.get("kids_destination", True))
     seeds = [
         str(episode.config.get("title") or ""),
-        str(episode.config.get("style") or ""),
-        "vlog",
-        "family",
+        "anak" if language == "id" else "kids",
+        "keluarga" if language == "id" else "family",
         "indonesia" if language == "id" else language,
+        "bermain" if language == "id" else "play",
     ]
-    if language == "id":
-        seeds.extend(["keluarga", "vlog keluarga"])
-    if made_for_kids:
-        seeds.extend(["kids", "anak"])
+    if not kids:
+        seeds.extend(["vlog", str(episode.config.get("style") or "")])
     for section in plan.get("structure", []) or []:
         if isinstance(section, dict):
-            seeds.append(str(section.get("section") or ""))
+            label = str(section.get("section") or "")
+            seeds.append(kids_section_label(label, language) if kids else label)
     seeds.extend(str(item) for item in (extra or []))
     seeds.extend(str(item) for item in config.get("tags") or [])
     tags: list[str] = []
     used = 0
     for token in _slug_tokens(*seeds):
-        if used + len(token) + 1 > 450 or len(tags) >= 25:
+        if token in _KIDS_TAG_BLOCKLIST:
+            continue
+        if used + len(token) + 1 > 450 or len(tags) >= 15:
             break
         tags.append(token)
         used += len(token) + 1
@@ -254,43 +306,68 @@ def build_description(
     tags: list[str],
 ) -> str:
     config = youtube_config(episode)
+    kids = bool(config.get("kids_destination", True))
     if config.get("description"):
-        return str(config["description"])[:5000]
+        text = str(config["description"])[:5000]
+        if kids and _URL_RE.search(text):
+            raise ValueError("YouTube Kids listings cannot include URLs in the description.")
+        return text
     language = episode_language(episode)
-    style = str(episode.config.get("style") or "").strip()
-    chapters = chapter_timestamps(plan)
-    if language == "id":
+    chapters = chapter_timestamps(plan, language=language, kids_destination=kids)
+    if kids and language == "id":
         lines = [
             title,
             "",
-            f"Vlog keluarga: {style}." if style else "Vlog keluarga.",
+            "Video untuk anak: main, jalan-jalan, dan momen seru bersama keluarga.",
+            "Bahasa Indonesia. Cocok ditonton bareng.",
+            "",
+        ]
+        heading = "Isi video:"
+        hashtags = ["#anak", "#keluarga", "#indonesia"]
+    elif kids:
+        lines = [
+            title,
+            "",
+            "A kids video: play, going out, and fun family moments.",
+            "Simple language. Good to watch together.",
+            "",
+        ]
+        heading = "In this video:"
+        hashtags = ["#kids", "#family", "#indonesia"]
+    elif language == "id":
+        style = str(episode.config.get("style") or "").strip()
+        lines = [
+            title,
+            "",
+            f"Vlog keluarga: {style}.".strip(),
             "Rekaman asli, dipotong lokal. Caption Indonesia ada di file SRT.",
             "",
         ]
-        if chapters:
-            lines.append("Babak:")
-            lines.extend(f"{stamp} {label}" for stamp, label in chapters)
-            lines.append("")
+        heading = "Babak:"
         hashtags = ["#vlogkeluarga", "#anak", "#indonesia"]
     else:
         lines = [
             title,
             "",
-            f"Family vlog: {style}." if style else "Family vlog.",
-            "Edited locally. Indonesian/English captions are a separate SRT.",
+            "Family vlog. Edited locally. Captions are a separate SRT.",
             "",
         ]
-        if chapters:
-            lines.append("Chapters:")
-            lines.extend(f"{stamp} {label}" for stamp, label in chapters)
-            lines.append("")
+        heading = "Chapters:"
         hashtags = ["#familyvlog", "#kids", "#indonesia"]
-    for tag in tags[:8]:
-        hash_tag = "#" + re.sub(r"[^\w]", "", tag, flags=re.UNICODE)
-        if len(hash_tag) > 2 and hash_tag.lower() not in {item.lower() for item in hashtags}:
-            hashtags.append(hash_tag)
-    lines.append(" ".join(hashtags[:12]))
-    return "\n".join(lines).strip()[:5000]
+    if chapters:
+        lines.append(heading)
+        lines.extend(f"{stamp} {label}" for stamp, label in chapters)
+        lines.append("")
+    if not kids:
+        for tag in tags[:8]:
+            hash_tag = "#" + re.sub(r"[^\w]", "", tag, flags=re.UNICODE)
+            if len(hash_tag) > 2 and hash_tag.lower() not in {item.lower() for item in hashtags}:
+                hashtags.append(hash_tag)
+    lines.append(" ".join(hashtags[:5]))
+    description = "\n".join(lines).strip()[:5000]
+    if kids and _URL_RE.search(description):
+        raise ValueError("YouTube Kids listings cannot include URLs in the description.")
+    return description
 
 
 def generate_listing(
@@ -306,19 +383,30 @@ def generate_listing(
     privacy_value = str(privacy or config.get("privacy") or "unlisted").strip().lower()
     if privacy_value not in _PRIVACY:
         raise ValueError(f"Invalid YouTube privacy {privacy_value!r}; use private, unlisted, or public")
-    kids = config.get("made_for_kids", True) if made_for_kids is None else made_for_kids
+    kids_destination = bool(config.get("kids_destination", True))
+    if made_for_kids is None:
+        kids_flag = True if kids_destination else bool(config.get("made_for_kids", True))
+    else:
+        kids_flag = bool(made_for_kids)
+        if kids_destination and not kids_flag:
+            raise ValueError(
+                "kids_destination requires made_for_kids=true (YouTube Kids / COPPA)."
+            )
     listing = {
         "title": title,
         "description": build_description(episode, plan, title=title, tags=tags),
         "tags": tags,
-        "category_id": str(config.get("category_id") or "22"),
+        "category_id": str(config.get("category_id") or "24"),
         "privacy": privacy_value,
-        "made_for_kids": bool(kids),
-        "notify_subscribers": bool(config.get("notify_subscribers", False)),
+        "made_for_kids": kids_flag,
+        "kids_destination": kids_destination,
+        "notify_subscribers": False if kids_destination else bool(config.get("notify_subscribers", False)),
         "upload_captions": bool(config.get("upload_captions", True)),
         "language": episode_language(episode),
         "playlist_id": config.get("playlist_id") or None,
         "contains_synthetic_media": bool(config.get("contains_synthetic_media", False)),
+        "paid_promotion": False if kids_destination else bool(config.get("paid_promotion", False)),
+        "embeddable": bool(config.get("embeddable", True)),
         "generated_at": datetime.now(UTC).isoformat(),
     }
     write_json(listing_path(episode), listing)
@@ -340,7 +428,7 @@ def video_body(listing: dict[str, Any]) -> dict[str, Any]:
     status: dict[str, Any] = {
         "privacyStatus": str(listing.get("privacy") or "unlisted"),
         "selfDeclaredMadeForKids": bool(listing.get("made_for_kids", True)),
-        "embeddable": True,
+        "embeddable": bool(listing.get("embeddable", True)),
         "publicStatsViewable": True,
         "license": "youtube",
     }
@@ -350,7 +438,7 @@ def video_body(listing: dict[str, Any]) -> dict[str, Any]:
         "title": str(listing.get("title") or "Vlog")[:100],
         "description": str(listing.get("description") or "")[:5000],
         "tags": list(listing.get("tags") or []),
-        "categoryId": str(listing.get("category_id") or "22"),
+        "categoryId": str(listing.get("category_id") or "24"),
         "defaultLanguage": language,
         "defaultAudioLanguage": language,
     }

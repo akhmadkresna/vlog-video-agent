@@ -45,9 +45,9 @@ def _plan() -> dict:
 
 def test_chapter_timestamps_start_at_zero() -> None:
     chapters = chapter_timestamps(_plan())
-    assert chapters[0] == ("0:00", "Greeting open")
+    assert chapters[0] == ("0:00", "Halo")
     assert chapters[1][0] == "0:16"
-    assert "Outdoor" in chapters[1][1]
+    assert chapters[1][1] == "Main di luar"
 
 
 def test_generate_listing_sets_kids_audience_and_indonesian_copy(tmp_path: Path) -> None:
@@ -55,12 +55,18 @@ def test_generate_listing_sets_kids_audience_and_indonesian_copy(tmp_path: Path)
     write_json(episode.plan_path, _plan())
     listing = generate_listing(episode)
     assert listing["made_for_kids"] is True
+    assert listing["kids_destination"] is True
     assert listing["privacy"] == "unlisted"
     assert listing["language"] == "id"
+    assert listing["category_id"] == "24"
+    assert listing["paid_promotion"] is False
     assert listing["title"] == "School mornings and pickups"
-    assert "0:00 Greeting open" in listing["description"]
-    assert "0:16 Outdoor — Best moments" in listing["description"]
-    assert "#vlogkeluarga" in listing["description"]
+    assert "0:00 Halo" in listing["description"]
+    assert "0:16 Main di luar" in listing["description"]
+    assert "Video untuk anak" in listing["description"]
+    assert "http" not in listing["description"].lower()
+    assert listing["description"].count("#") <= 5
+    assert "cta" not in listing["tags"]
     assert "anak" in listing["tags"]
     assert "keluarga" in listing["tags"]
     assert listing_path(episode).is_file()
@@ -68,10 +74,22 @@ def test_generate_listing_sets_kids_audience_and_indonesian_copy(tmp_path: Path)
 
 def test_not_made_for_kids_override(tmp_path: Path) -> None:
     episode = _episode(tmp_path)
+    episode.config["youtube"]["kids_destination"] = False
     write_json(episode.plan_path, _plan())
     listing = generate_listing(episode, made_for_kids=False, privacy="private")
     assert listing["made_for_kids"] is False
     assert listing["privacy"] == "private"
+
+
+def test_kids_destination_rejects_not_made_for_kids(tmp_path: Path) -> None:
+    episode = _episode(tmp_path)
+    write_json(episode.plan_path, _plan())
+    try:
+        generate_listing(episode, made_for_kids=False)
+    except ValueError as exc:
+        assert "made_for_kids" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
 
 
 def test_video_body_declares_made_for_kids() -> None:

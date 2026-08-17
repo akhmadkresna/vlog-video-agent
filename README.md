@@ -114,6 +114,7 @@ with classic fallbacks, and never auto-downloads audio at runtime. See
 - `ve upload [episode]`: upload `output/final.mp4` + `captions.srt`. Default privacy is unlisted.
 
 YouTube OAuth setup: [`docs/youtube-upload.md`](docs/youtube-upload.md).
+YouTube Kids defaults: [`docs/youtube-kids.md`](docs/youtube-kids.md).
 
 ## Performance
 
