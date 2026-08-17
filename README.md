@@ -109,6 +109,11 @@ with classic fallbacks, and never auto-downloads audio at runtime. See
 - `ve render [episode]`: render and verify `output/final.mp4`.
 - `ve run [episode]`: analyze, plan, preview and stop for review.
 - `ve benchmark [episode]`: measure a warm three-frame Qwen vision request.
+- `ve youtube-login`: authorize this PC to upload (browser once).
+- `ve youtube-meta [episode]`: write `work/youtube_listing.json` (title, description, tags, made-for-kids).
+- `ve upload [episode]`: upload `output/final.mp4` + `captions.srt`. Default privacy is unlisted.
+
+YouTube OAuth setup: [`docs/youtube-upload.md`](docs/youtube-upload.md).
 
 ## Performance
 
@@ -143,10 +148,13 @@ my-trip/
 │   ├── clip_analysis.json
 │   ├── edit_plan.json
 │   ├── approval.json
+│   ├── youtube_listing.json
 │   └── dashboard/index.html
 └── output/
     ├── final.mp4
-    └── verification.json
+    ├── captions.srt
+    ├── verification.json
+    └── youtube_upload.json
 ```
 
 ## Attribution

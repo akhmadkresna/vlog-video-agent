@@ -80,10 +80,13 @@ def inspect_machine(config: dict[str, Any]) -> tuple[list[str], list[str]]:
 
 
 def print_report(config: dict[str, Any]) -> int:
+    from vlog_editor.youtube import youtube_ready
+
     ok, problems = inspect_machine(config)
+    yt_ok, yt_warn = youtube_ready()
     print("Local Vlog Editor doctor\n")
-    for line in ok:
+    for line in [*ok, *yt_ok]:
         print(f"OK   {line}")
-    for line in problems:
+    for line in [*problems, *yt_warn]:
         print(f"WARN {line}")
     return 0 if not problems else 1

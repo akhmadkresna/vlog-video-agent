@@ -11,6 +11,8 @@ from vlog_editor.doctor import print_report
 from vlog_editor.planner import create_balanced_plan, create_plan
 from vlog_editor.project import DEFAULT_CONFIG, create_episode, resolve_episode
 from vlog_editor.render import render_episode
+from vlog_editor.youtube import generate_listing, upload_episode
+from vlog_editor.youtube import login as youtube_login
 
 
 def _episode_argument(parser: argparse.ArgumentParser) -> None:
@@ -59,6 +61,41 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--force", action="store_true", help="Ignore analysis caches")
     run.add_argument("--no-open", action="store_true")
 
+    youtube_login_cmd = subparsers.add_parser(
+        "youtube-login",
+        help="Authorize this machine to upload to YouTube (browser once)",
+    )
+    youtube_login_cmd.set_defaults(command="youtube-login")
+
+    meta = subparsers.add_parser(
+        "youtube-meta",
+        help="Write work/youtube_listing.json (title, description, tags, made-for-kids)",
+    )
+    _episode_argument(meta)
+    meta.add_argument("--privacy", choices=["private", "unlisted", "public"])
+    kids = meta.add_mutually_exclusive_group()
+    kids.add_argument("--made-for-kids", dest="made_for_kids", action="store_true")
+    kids.add_argument("--not-made-for-kids", dest="made_for_kids", action="store_false")
+    meta.set_defaults(made_for_kids=None)
+
+    upload = subparsers.add_parser(
+        "upload",
+        help="Upload rendered final.mp4 plus captions.srt to YouTube",
+    )
+    _episode_argument(upload)
+    upload.add_argument("--dry-run", action="store_true", help="Write listing/request JSON only")
+    upload.add_argument("--privacy", choices=["private", "unlisted", "public"])
+    upload_kids = upload.add_mutually_exclusive_group()
+    upload_kids.add_argument("--made-for-kids", dest="made_for_kids", action="store_true")
+    upload_kids.add_argument("--not-made-for-kids", dest="made_for_kids", action="store_false")
+    upload.set_defaults(made_for_kids=None)
+    upload.add_argument("--skip-captions", action="store_true")
+    upload.add_argument(
+        "--force",
+        action="store_true",
+        help="Upload a new YouTube copy even if output/youtube_upload.json exists",
+    )
+
     return parser
 
 
@@ -66,6 +103,10 @@ def dispatch(args: argparse.Namespace) -> int:
     if args.command == "doctor":
         config = resolve_episode(args.episode).config if args.episode else DEFAULT_CONFIG
         return print_report(config)
+    if args.command == "youtube-login":
+        path = youtube_login()
+        print(f"YouTube login saved to {path}")
+        return 0
     if args.command == "new":
         episode = create_episode(args.path, force=args.force)
         print(f"Created {episode.root}")
@@ -100,6 +141,35 @@ def dispatch(args: argparse.Namespace) -> int:
         print("\nStopped for review. When satisfied:")
         print(f"  ve approve {episode.root}")
         print(f"  ve render {episode.root}")
+    elif args.command == "youtube-meta":
+        listing = generate_listing(
+            episode,
+            privacy=args.privacy,
+            made_for_kids=args.made_for_kids,
+        )
+        print(f"Wrote {episode.work / 'youtube_listing.json'}")
+        print(f"Title: {listing['title']}")
+        print(f"Privacy: {listing['privacy']}")
+        print(f"Made for kids: {listing['made_for_kids']}")
+        print(f"Tags: {', '.join(listing['tags'][:12])}")
+    elif args.command == "upload":
+        result = upload_episode(
+            episode,
+            privacy=args.privacy,
+            made_for_kids=args.made_for_kids,
+            skip_captions=args.skip_captions,
+            force=args.force,
+            dry_run=args.dry_run,
+        )
+        if result.get("dry_run"):
+            print(f"Dry run: {episode.work / 'youtube_dry_run.json'}")
+            print(f"Title: {result['listing']['title']}")
+            print(f"Privacy: {result['listing']['privacy']}")
+            print(f"Made for kids: {result['listing']['made_for_kids']}")
+        else:
+            print(f"Uploaded {result['url']}")
+            print(f"Studio: {result['studio_url']}")
+            print(f"Made for kids: {result['made_for_kids']}  Privacy: {result['privacy']}")
     return 0
 
 

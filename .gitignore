@@ -28,3 +28,7 @@ output/
 # Local configuration and secrets
 .env
 *.local.yaml
+client_secrets.json
+*client_secret*.json
+youtube-token.json
+youtube-client-secrets.json
