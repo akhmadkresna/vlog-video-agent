@@ -248,23 +248,31 @@ def validate_and_fix_plan(
     fixed.setdefault("bgm_suggestion", "")
     fixed.setdefault("editing_notes", "")
 
-    # Diversity is judged against the primary capture day represented in the plan,
-    # so multi-day folders do not force impossible cross-day montage.
-    day_counts: dict[str, int] = defaultdict(int)
-    for source in ordered_sources:
-        day = _capture_day(source)
-        if day:
-            day_counts[day] += 1
-    primary_day = max(day_counts, key=day_counts.get) if day_counts else ""
-    if primary_day:
-        fixed["planning_day"] = primary_day
-        diversity_pool = [
-            clip
-            for clip in clips_by_name.values()
-            if _capture_day(clip) in {"", primary_day}
-        ]
-    else:
+    # Diversity: all_days plans judge against the full analysis pool; otherwise
+    # against the primary capture day represented in the plan so multi-day folders
+    # do not force impossible cross-day montage under primary_day scope.
+    scope = str(fixed.get("planning_scope") or "primary_day").strip().lower().replace("-", "_")
+    if scope in {"all", "all_days", "multi", "multi_day", "multiday", "every_day"}:
+        fixed["planning_scope"] = "all_days"
+        fixed["planning_day"] = "all_days"
         diversity_pool = list(clips_by_name.values())
+    else:
+        day_counts: dict[str, int] = defaultdict(int)
+        for source in ordered_sources:
+            day = _capture_day(source)
+            if day:
+                day_counts[day] += 1
+        primary_day = max(day_counts, key=day_counts.get) if day_counts else ""
+        if primary_day:
+            fixed["planning_day"] = primary_day
+            diversity_pool = [
+                clip
+                for clip in clips_by_name.values()
+                if _capture_day(clip) in {"", primary_day}
+            ]
+        else:
+            diversity_pool = list(clips_by_name.values())
+        fixed.setdefault("planning_scope", "primary_day")
 
     available_settings = {
         infer_setting(clip) for clip in diversity_pool if infer_setting(clip) != "other"

@@ -704,6 +704,24 @@ def select_primary_day_clips(clips: list[dict[str, Any]]) -> tuple[list[dict[str
     return by_day[primary_day] + undated, primary_day
 
 
+def normalize_planning_scope(raw: Any) -> str:
+    text = str(raw or "primary_day").strip().lower().replace("-", "_")
+    if text in {"all", "all_days", "multi", "multi_day", "multiday", "every_day"}:
+        return "all_days"
+    return "primary_day"
+
+
+def select_planning_clips(
+    clips: list[dict[str, Any]],
+    *,
+    planning_scope: Any = "primary_day",
+) -> tuple[list[dict[str, Any]], str]:
+    """Return the clip pool used for planning plus a planning_day label."""
+    if normalize_planning_scope(planning_scope) == "all_days":
+        return list(clips), "all_days"
+    return select_primary_day_clips(clips)
+
+
 def select_required_settings(
     settings_present: list[str],
     *,
@@ -938,9 +956,11 @@ def build_balanced_fallback_plan(
     title: str,
     setting_order: list[str] | None = None,
     story_arc: str = "scene_energy",
+    planning_scope: Any = "primary_day",
 ) -> dict[str, Any]:
     unique = unique_clips(analysis)
-    pool, primary_day = select_primary_day_clips(unique)
+    scope = normalize_planning_scope(planning_scope)
+    pool, primary_day = select_planning_clips(unique, planning_scope=scope)
     if not pool:
         raise ValueError("Cannot build a fallback plan without analyzed clips")
 
@@ -1632,11 +1652,12 @@ def build_balanced_fallback_plan(
             }
         )
 
-    day_note = (
-        f" Primary capture day: {primary_day}."
-        if primary_day not in {"", "unknown"}
-        else ""
-    )
+    if scope == "all_days":
+        day_note = " Planning scope: all capture days (still capture-time ordered)."
+    elif primary_day not in {"", "unknown"}:
+        day_note = f" Primary capture day: {primary_day}."
+    else:
+        day_note = ""
     if arc == "kids_energy":
         editing_notes = (
             "Kids-energy story arc: greeting/open → kids peak → kids peak 2 → "
@@ -1656,11 +1677,16 @@ def build_balanced_fallback_plan(
             f"{day_note}"
         )
     else:
+        diversity_note = (
+            "across the selected capture days"
+            if scope == "all_days"
+            else "within one capture day (including late-day evening beats)"
+        )
         editing_notes = (
             "Kids-audience chronological storyboard. Priority 1: children on camera/speaking. "
             "Priority 2: kid-interesting activity categories (play structures, animals/creatures, "
             "water play, treats, discovery/wonder, rides) — never place hardcodes. "
-            "Keep setting diversity within one capture day (including late-day evening beats), "
+            f"Keep setting diversity {diversity_note}, "
             "preserve complete play narration, and bookend with a greeting/start-of-day open "
             "(or playful open if no greeting) plus a fuller CTA/goodbye close when footage allows."
             f"{day_note}"
@@ -1671,6 +1697,7 @@ def build_balanced_fallback_plan(
         "bgm_suggestion": "",
         "editing_notes": editing_notes,
         "planning_day": primary_day,
+        "planning_scope": scope,
         "story_arc": arc,
     }
 
@@ -1678,10 +1705,13 @@ def build_balanced_fallback_plan(
 def resolve_target_duration(
     configured: Any,
     analysis: dict[str, Any],
+    *,
+    planning_scope: Any = "primary_day",
 ) -> tuple[float, str]:
     is_auto = configured is None or (
         isinstance(configured, str) and configured.strip().lower() == "auto"
     )
+    scope = normalize_planning_scope(planning_scope)
     if not is_auto:
         try:
             target = float(configured)
@@ -1692,7 +1722,7 @@ def resolve_target_duration(
         return target, "explicit"
 
     unique = unique_clips(analysis)
-    pool, _ = select_primary_day_clips(unique)
+    pool, _ = select_planning_clips(unique, planning_scope=scope)
     if not pool:
         raise ValueError("Cannot determine an automatic duration without analyzed clips")
 
@@ -1709,10 +1739,12 @@ def resolve_target_duration(
     play_ratio = playful_duration / total_duration if total_duration else 0.0
 
     # Ordinary travel B-roll ~16%; play-heavy kids days keep more fooling-around
-    # narration so scenes feel complete (up to ~28% of primary-day footage).
+    # narration so scenes feel complete (up to ~28% of planning-pool footage).
     retain = 0.16 + 0.12 * min(1.0, play_ratio * 1.6)
     target = total_duration * retain * (0.75 + 0.25 * average_score)
-    target = min(target, total_duration * 0.8, 720.0)
+    # Multi-day pools can support longer edits than a single capture day.
+    duration_cap = 1200.0 if scope == "all_days" else 720.0
+    target = min(target, total_duration * 0.8, duration_cap)
     if total_duration >= 150:
         target = max(target, 120.0)
     else:
@@ -1754,15 +1786,26 @@ def _compact_analysis(analysis: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _planning_prompt(episode: Episode, compact: list[dict[str, Any]], target: float) -> str:
+    scope = normalize_planning_scope(episode.config.get("planning_scope", "primary_day"))
+    if scope == "all_days":
+        day_rule = (
+            "- Use footage from every capture day present in the analysis. Keep strict "
+            "capture_time order across days (earlier calendar days before later ones)."
+        )
+    else:
+        day_rule = (
+            "- Prefer one primary capture day when multiple days are present."
+        )
     return f"""
 Act as a decisive travel-vlog editor. Build a coherent edit from the clip analysis below.
 Title/theme: {episode.config['title']}
 Style: {episode.config['style']}
 Target duration: {target:.0f} seconds
+Planning scope: {scope}
 
 Rules:
 - Keep the final edit in capture_time order. Never jump backward in capture time.
-- Prefer one primary capture day when multiple days are present.
+{day_rule}
 - Prefer original filenames over duplicate "Copy" files.
 - Use a hook, development, highlight, and emotional close; 4-10 sections total.
 - Prefer landscape, high quality, motion and story value. Skip poor/redundant footage.
@@ -1862,9 +1905,11 @@ def create_balanced_plan(episode: Episode) -> dict[str, Any]:
     if not episode.analysis_path.is_file():
         raise FileNotFoundError("Missing clip analysis. Run `ve analyze` first.")
     analysis = _prepare_analysis(episode)
+    planning_scope = episode.config.get("planning_scope", "primary_day")
     target_duration, target_mode = resolve_target_duration(
         episode.config.get("target_duration_sec"),
         analysis,
+        planning_scope=planning_scope,
     )
     fallback = build_balanced_fallback_plan(
         analysis,
@@ -1872,6 +1917,7 @@ def create_balanced_plan(episode: Episode) -> dict[str, Any]:
         title=str(episode.config["title"]),
         setting_order=list(episode.config.get("setting_order", [])),
         story_arc=str(episode.config.get("story_arc", "scene_energy")),
+        planning_scope=planning_scope,
     )
     fixed, errors = validate_and_fix_plan(
         fallback,
@@ -1893,10 +1939,21 @@ def create_plan(episode: Episode) -> dict[str, Any]:
     if not episode.analysis_path.is_file():
         raise FileNotFoundError("Missing clip analysis. Run `ve analyze` first.")
     analysis = _prepare_analysis(episode)
-    compact = _compact_analysis(analysis)
+    planning_scope = episode.config.get("planning_scope", "primary_day")
+    scope = normalize_planning_scope(planning_scope)
+    pool, _ = select_planning_clips(unique_clips(analysis), planning_scope=scope)
+    pool_names = {
+        str(clip.get("metadata", {}).get("filename", ""))
+        for clip in pool
+        if clip.get("metadata", {}).get("filename")
+    }
+    compact = [
+        item for item in _compact_analysis(analysis) if str(item.get("file", "")) in pool_names
+    ]
     target_duration, target_mode = resolve_target_duration(
         episode.config.get("target_duration_sec"),
         analysis,
+        planning_scope=planning_scope,
     )
     client = OllamaClient(dict(episode.config["vision"]))
     try:
@@ -1910,12 +1967,21 @@ def create_plan(episode: Episode) -> dict[str, Any]:
             parse_json_response(content),
             target_duration,
         )
+        plan["planning_scope"] = scope
         fixed, errors = validate_and_fix_plan(
             plan,
             analysis,
             target_duration=target_duration,
         )
         if errors:
+            day_repair = (
+                "Use every capture day present while keeping capture_time order."
+                if scope == "all_days"
+                else (
+                    "Keep selections in capture_time order and stay on one primary "
+                    "capture day when multiple days are present."
+                )
+            )
             repair_prompt = f"""
 Repair this edit plan. Return only the complete corrected JSON plan.
 The required target duration is {target_duration:.1f} seconds. The sum of every
@@ -1923,8 +1989,7 @@ selected clip's (end - start) must be between {target_duration * 0.65:.1f} and
 {target_duration * 1.35:.1f} seconds. Shorten pure visual B-roll if needed, but
 preserve complete useful speech and fooling-around / play exchanges — do not
 delete funny kids narration to hit the budget.
-Keep selections in capture_time order and stay on one primary capture day when
-multiple days are present. Prefer original files over duplicate Copy files.
+{day_repair} Prefer original files over duplicate Copy files.
 Cover the major distinct locations and activities from that day; use at least
 four settings when available, and do not let one setting consume more than 40%
 of the target duration.
@@ -1947,6 +2012,7 @@ Broken plan:
                 parse_json_response(repaired_content),
                 target_duration,
             )
+            repaired["planning_scope"] = scope
             fixed, errors = validate_and_fix_plan(
                 repaired,
                 analysis,
@@ -1959,6 +2025,7 @@ Broken plan:
                 title=str(episode.config["title"]),
                 setting_order=list(episode.config.get("setting_order", [])),
                 story_arc=str(episode.config.get("story_arc", "scene_energy")),
+                planning_scope=planning_scope,
             )
             fixed, errors = validate_and_fix_plan(
                 fallback,

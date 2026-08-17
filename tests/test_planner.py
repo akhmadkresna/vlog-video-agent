@@ -160,6 +160,69 @@ def test_balanced_fallback_follows_capture_chronology_and_primary_day() -> None:
     assert fixed["structure"][0]["section"].startswith("Home")
 
 
+def test_balanced_fallback_all_days_includes_secondary_capture_day() -> None:
+    analysis = {
+        "clips": [
+            _clip(
+                "home.mov",
+                30,
+                setting="home",
+                capture_time="2026-08-01T00:30:00.000000Z",
+            ),
+            _clip(
+                "vehicle.mov",
+                30,
+                setting="vehicle",
+                capture_time="2026-08-01T05:00:00.000000Z",
+            ),
+            _clip(
+                "store.mov",
+                30,
+                setting="store",
+                capture_time="2026-08-01T06:00:00.000000Z",
+            ),
+            _clip(
+                "outdoor.mov",
+                30,
+                setting="outdoor",
+                capture_time="2026-08-01T07:00:00.000000Z",
+            ),
+            _clip(
+                "later-mall.mov",
+                40,
+                setting="mall",
+                capture_time="2026-08-08T03:00:00.000000Z",
+                transcript="anak senang di mall malam ini",
+            ),
+        ]
+    }
+    plan = build_balanced_fallback_plan(
+        analysis,
+        150,
+        title="Week",
+        story_arc="chronological",
+        planning_scope="all_days",
+    )
+    fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=150)
+    assert errors == []
+    assert fixed["planning_day"] == "all_days"
+    assert fixed["planning_scope"] == "all_days"
+    selected = [
+        clip["file"]
+        for section in fixed["structure"]
+        for clip in section["clips"]
+    ]
+    assert "later-mall.mov" in selected
+    assert selected == sorted(
+        selected,
+        key=lambda name: next(
+            item["metadata"]["capture_time"]
+            for item in analysis["clips"]
+            if item["metadata"]["filename"] == name
+        ),
+    )
+
+
 def test_kids_energy_arc_orders_peak_before_quiet() -> None:
     play = _clip(
         "playground.mov",

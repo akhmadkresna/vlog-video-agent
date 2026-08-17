@@ -60,6 +60,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # kids_energy = open → global kids peak → peak 2 → quiet/adult → goodbye
     # chronological = full capture-time order
     "story_arc": "scene_energy",
+    # primary_day = plan from the heaviest capture day only (default).
+    # all_days = use every dated day in footage/ (still capture-time ordered).
+    "planning_scope": "primary_day",
 }
 
 

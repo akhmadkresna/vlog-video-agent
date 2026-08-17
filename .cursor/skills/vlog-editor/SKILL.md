@@ -27,7 +27,9 @@ Use the `ve` CLI. Do not recreate its media logic in ad-hoc scripts.
 - All AI inference stays local through Ollama at `127.0.0.1`.
 - Never bypass the plan-hash approval gate.
 - Never cut through a spoken word; retain validator corrections.
-- Keep one primary capture day. Default `story_arc: scene_energy` uses contiguous
+- Default to one primary capture day. For longer multi-day edits, set
+  `planning_scope: all_days` in that episode's `project.yaml` (still capture-time
+  ordered across days). Default `story_arc: scene_energy` uses contiguous
   same-setting scenes in time order, ranking best→better kids energy inside each scene
   (morning car ≠ night car). Alternatives via episode `project.yaml`: `kids_energy` or
   `chronological`.
