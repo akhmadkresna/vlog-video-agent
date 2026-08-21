@@ -70,6 +70,16 @@ sfx:
         license: cc0
         attribution: null
         source_url: https://kenney.nl/assets/interface-sounds
+  hype_voice:
+    # Kid voice hype ("yes!", "okay!", "yay!", "woohoo!", "let's go!", "wow!").
+    # Not bundled: like meme/, these single-word reaction clips are usually
+    # soundboard/meme drops without clear redistribution rights. Drop your
+    # own license-free-only files under sfx/hype_voice/ and list them below
+    # with a role from: yes, okay, yay, woohoo, lets_go, wow. See SOURCES.md
+    # for a starting list of places to look. Kept quiet by default (0.35) so
+    # it punctuates footage without talking over the kids on camera.
+    gain: 0.35
+    files: []
   meme:
     gain: 0.55
     files:

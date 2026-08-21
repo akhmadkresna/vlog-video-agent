@@ -16,7 +16,8 @@ music or SFX.
 - `public_domain`
 - `pixabay` — Pixabay Content License
 - `original` — recordings you own and mark free for this project
-- `user_provided` — local meme drops under `sfx/meme/` (pack owner accepts use; not CC0)
+- `user_provided` — local meme / hype-voice drops under `sfx/meme/` or
+  `sfx/hype_voice/` (pack owner accepts use; not CC0)
 
 ## Bundled defaults
 
@@ -26,9 +27,19 @@ music or SFX.
 | `sparkle` / `success` | [Kenney](https://kenney.nl/assets/interface-sounds) (CC0) |
 | `pop` / `whoosh` / `rimshot` / `fail` | Optional classic slots (empty in default) |
 | `click` / `boom` / `bruh` / `goofy_laugh` / `fart` | `sfx/meme/` (`user_provided`) |
+| `yes` / `okay` / `yay` / `woohoo` / `lets_go` / `wow` | `sfx/hype_voice/` (`user_provided`, empty by default) |
 
 Meme files stay in one folder (`sfx/meme/`) and declare a `role` in `pack.yaml`.
 The planner tries meme roles first, then classic types, with a meme density cap.
+
+Kid-voice hype works the same way, in its own `sfx/hype_voice/` folder — short
+spoken exclamations the planner fires on strong kids-energy beats (play,
+discovery, water play, rides, cute/laugh moments), kept quiet by default
+(gain 0.35) and capped further than meme (~1 per 22s) so a repeated word
+doesn't get grating. It's empty by default: these single-word clips are
+almost always soundboard/meme sourced with unclear redistribution rights, so
+none ship out of the box — see `SOURCES.md` for where to find license-free
+ones (Pixabay, BigSoundBank, Freesound filtered to CC0).
 
 ### Bundled BGM (Pixabay Content License)
 
@@ -64,9 +75,11 @@ Prefer filters: **no attribution required** when available.
 | `fail` | soft buzzer, fail horn (soft) |
 | `success` | success chime, ding, reward |
 | meme roles | vine boom, bruh, goofy laugh, click, fart |
+| hype voice roles | kid saying "yes", "okay", "yay", "woohoo", "let's go", "wow" |
 
 Do **not** auto-scrape CapCut / YouTube trending sounds. Drop meme files you accept
 using into `audio/sfx/meme/` and declare them with `license: user_provided` + `role`.
+Hype voice clips follow the same pattern under `audio/sfx/hype_voice/`.
 
 ## Pack example
 

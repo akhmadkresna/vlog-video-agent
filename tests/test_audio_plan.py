@@ -103,10 +103,14 @@ def test_create_episode_seeds_bundled_defaults(tmp_path: Path) -> None:
     assert (episode.audio / "pack.yaml").is_file()
     assert (episode.audio / "sfx" / "boing").is_dir()
     assert (episode.audio / "sfx" / "meme").is_dir()
+    assert (episode.audio / "sfx" / "hype_voice").is_dir()
     pack = load_audio_pack(episode.root, "audio/pack.yaml")
     assert pack["errors"] == []
     assert pack["sfx"]["boing"]["files"]
     assert pack["sfx"]["meme"]["files"]
+    # Kid-voice hype ships empty by default (see SOURCES.md for why); the
+    # planner falls back to classic/meme cues until the user drops files in.
+    assert pack["sfx"]["hype_voice"]["files"] == []
     assert {entry["role"] for entry in pack["sfx"]["meme"]["files"]} >= {
         "boom",
         "bruh",
@@ -255,6 +259,46 @@ def test_cue_planner_prefers_meme_roles_with_fallbacks(tmp_path: Path) -> None:
     assert "click" in types or "boom" in types or "goofy_laugh" in types
     assert "goofy_laugh" in types
     assert all(cue["license"] == "user_provided" for cue in cues)
+    errors = validate_audio_plan(planned, episode.root, min_gap=6.0)
+    assert errors == []
+
+
+def test_cue_planner_uses_hype_voice_on_kids_energy_moments(tmp_path: Path) -> None:
+    episode = _episode(tmp_path)
+    hype_dir = episode.audio / "sfx" / "hype_voice"
+    hype_dir.mkdir(parents=True, exist_ok=True)
+    (hype_dir / "woohoo.mp3").write_bytes(b"fake")
+    pack_path = episode.audio / "pack.yaml"
+    pack_data = yaml.safe_load(pack_path.read_text(encoding="utf-8"))
+    pack_data["sfx"]["hype_voice"] = {
+        "gain": 0.35,
+        "files": [
+            {
+                "file": "sfx/hype_voice/woohoo.mp3",
+                "role": "woohoo",
+                "license": "user_provided",
+                "gain": 0.3,
+            }
+        ],
+    }
+    pack_path.write_text(yaml.safe_dump(pack_data), encoding="utf-8")
+
+    analysis = _analysis()
+    # Avoid laugh/cute trigger words so the new kids-interest branch is what fires.
+    analysis["clips"][0]["visual"]["summary"] = "playground slide equipment"
+    analysis["clips"][0]["visual"]["story_value"] = 0.65
+    analysis["clips"][0]["audio"]["text"] = "seru banget naik ayunan di playground"
+    plan = _plan()
+    plan["structure"][0]["clips"][0]["note"] = "playground slide equipment"
+    plan["structure"][0]["clips"][0]["subtitle"] = "seru banget naik ayunan di playground"
+
+    planned = plan_audio_cues(episode, plan, analysis)
+    cues = planned["audio_cues"]
+    hype_cues = [cue for cue in cues if cue["type"] == "woohoo"]
+    assert hype_cues
+    assert hype_cues[0]["role"] == "woohoo"
+    # Stays quiet relative to meme gains (0.55) so it doesn't talk over kids.
+    assert hype_cues[0]["gain"] <= 0.4
     errors = validate_audio_plan(planned, episode.root, min_gap=6.0)
     assert errors == []
 

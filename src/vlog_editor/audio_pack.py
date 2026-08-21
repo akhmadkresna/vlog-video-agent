@@ -19,9 +19,13 @@ ALLOWED_LICENSES = frozenset(
 # Pack keys / on-disk folders (meme files live under sfx/meme/).
 CLASSIC_SFX_TYPES = ("boing", "pop", "whoosh", "sparkle", "rimshot", "fail", "success")
 MEME_ROLES = ("boom", "bruh", "fart", "goofy_laugh", "click")
-SFX_TYPES = (*CLASSIC_SFX_TYPES, "meme")
-# Cue types emitted into edit plans (classic names + meme roles).
-CUE_TYPES = (*CLASSIC_SFX_TYPES, *MEME_ROLES)
+# Short kid-voice hype exclamations (files live under sfx/hype_voice/, same
+# user_provided convention as meme/ — these are soundboard-style spoken clips
+# with unclear redistribution rights, so none are bundled by default).
+HYPE_VOICE_ROLES = ("yes", "okay", "yay", "woohoo", "lets_go", "wow")
+SFX_TYPES = (*CLASSIC_SFX_TYPES, "meme", "hype_voice")
+# Cue types emitted into edit plans (classic names + meme roles + hype voice roles).
+CUE_TYPES = (*CLASSIC_SFX_TYPES, *MEME_ROLES, *HYPE_VOICE_ROLES)
 
 DEFAULT_PACK_TEMPLATE = """\
 style: funny_kids_indo
@@ -54,6 +58,13 @@ sfx:
     files: []
   meme:
     gain: 0.55
+    files: []
+  hype_voice:
+    # Kid voice hype ("yes!", "okay!", "yay!", "woohoo!", "let's go!", "wow!").
+    # Same as meme/: drop local license-free-only files under sfx/hype_voice/
+    # and list them here with a role from: yes, okay, yay, woohoo, lets_go, wow.
+    # Kept quiet by default so it punctuates footage without talking over it.
+    gain: 0.35
     files: []
 """
 
@@ -107,6 +118,7 @@ def ensure_audio_pack_layout(episode_root: Path) -> Path:
     for name in CLASSIC_SFX_TYPES:
         (root / "sfx" / name).mkdir(parents=True, exist_ok=True)
     (root / "sfx" / "meme").mkdir(parents=True, exist_ok=True)
+    (root / "sfx" / "hype_voice").mkdir(parents=True, exist_ok=True)
     pack_path = root / "pack.yaml"
     if seed_bundled_default_pack(episode_root):
         return pack_path
@@ -202,6 +214,14 @@ def load_audio_pack(episode_root: Path, pack_rel: str | Path) -> dict[str, Any]:
                         f"SFX {entry['file']}: meme role must be one of {sorted(MEME_ROLES)}"
                     )
                     continue
+            if cue_type == "hype_voice":
+                role = entry.get("role")
+                if role not in HYPE_VOICE_ROLES:
+                    errors.append(
+                        f"SFX {entry['file']}: hype_voice role must be one of "
+                        f"{sorted(HYPE_VOICE_ROLES)}"
+                    )
+                    continue
             files.append(entry)
         sfx[cue_type] = {"gain": default_gain, "files": files}
 
@@ -224,10 +244,18 @@ def resolve_pack_file(episode_root: Path, relative: str) -> Path:
     return episode_root / "audio" / relative
 
 
-def meme_files_for_role(pack: dict[str, Any], role: str) -> list[dict[str, Any]]:
-    block = pack.get("sfx", {}).get("meme", {}) or {}
+def _files_for_role(pack: dict[str, Any], block_name: str, role: str) -> list[dict[str, Any]]:
+    block = pack.get("sfx", {}).get(block_name, {}) or {}
     return [
         entry
         for entry in block.get("files", []) or []
         if str(entry.get("role") or "") == role
     ]
+
+
+def meme_files_for_role(pack: dict[str, Any], role: str) -> list[dict[str, Any]]:
+    return _files_for_role(pack, "meme", role)
+
+
+def hype_voice_files_for_role(pack: dict[str, Any], role: str) -> list[dict[str, Any]]:
+    return _files_for_role(pack, "hype_voice", role)
