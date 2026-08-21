@@ -408,26 +408,23 @@ def test_scene_energy_arc_keeps_scene_time_order_and_ranks_within_scene() -> Non
         assert "outdoor-weak.mov" not in outdoor_files
 
 
-def test_cluster_contiguous_scenes_splits_on_time_gap() -> None:
+def test_cluster_contiguous_scenes_splits_on_time_of_day() -> None:
     clips = [
         {
             "file": "a.mov",
             "_capture_time": "2026-08-01T01:00:00.000000Z",
-            "_section_setting": "vehicle",
             "start": 0,
             "end": 10,
         },
         {
             "file": "b.mov",
             "_capture_time": "2026-08-01T01:10:00.000000Z",
-            "_section_setting": "vehicle",
             "start": 0,
             "end": 10,
         },
         {
             "file": "c.mov",
             "_capture_time": "2026-08-01T07:00:00.000000Z",
-            "_section_setting": "vehicle",
             "start": 0,
             "end": 10,
         },

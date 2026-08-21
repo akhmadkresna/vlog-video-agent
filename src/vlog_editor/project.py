@@ -52,11 +52,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_lines": 2,
         "max_cue_sec": 4.5,
         "font_name": "Arial",
-        "font_size": 48,
+        "font_size": 64,
+        "bold": True,
         "margin_v": 64,
+        # Karaoke burn-in: words highlight in primary_color as they're spoken,
+        # outlined in outline_color. Set karaoke false for plain static captions.
+        "karaoke": True,
+        "primary_color": "#FF2D78",
+        "secondary_color": "#FFFFFF",
+        "outline_color": "#FFFFFF",
+        "outline_width": 4,
     },
     # Default story shape for balanced plans. Override per episode in project.yaml.
-    # scene_energy = contiguous same-setting scenes in capture order; best→better inside
+    # scene_energy = time-of-day scenes (Morning/Afternoon/Evening/Night) in capture order; best→better inside
     # kids_energy = open → global kids peak → peak 2 → quiet/adult → goodbye
     # chronological = full capture-time order
     "story_arc": "scene_energy",

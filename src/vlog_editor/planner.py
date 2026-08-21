@@ -40,6 +40,8 @@ MIN_OPEN_CTA_SEC = 12.0
 LATE_DAY_FRACTION = 0.30
 LATE_DAY_RESERVE_RATIO = 0.22
 
+MIN_RECOMMENDED_DURATION_SEC = 7 * 60
+
 CTA_RE = re.compile(
     r"\b("
     r"thanks|thank you|makasih|terima kasih|bye|dadah|daah|"
@@ -564,9 +566,6 @@ def is_low_activity_source(source: dict[str, Any]) -> bool:
     return not is_peak_kids_source(source)
 
 
-SCENE_GAP_SEC = 40 * 60
-
-
 def _capture_epoch(capture_time: str) -> float | None:
     text = str(capture_time or "").strip()
     if not text:
@@ -579,12 +578,30 @@ def _capture_epoch(capture_time: str) -> float | None:
         return None
 
 
-def cluster_contiguous_scenes(
-    items: list[dict[str, Any]],
-    *,
-    gap_sec: float = SCENE_GAP_SEC,
-) -> list[list[dict[str, Any]]]:
-    """Group clips into contiguous same-setting scenes (not whole-day buckets)."""
+TIME_OF_DAY_BUCKETS = (
+    (5, 11, "Morning"),
+    (11, 17, "Afternoon"),
+    (17, 21, "Evening"),
+)
+
+
+def time_of_day_bucket(capture_time: str) -> str:
+    """Simple daypart label (Morning/Afternoon/Evening/Night) from a capture_time hour."""
+    text = str(capture_time or "").strip()
+    if len(text) < 13 or text[10] not in ("T", " "):
+        return "Night"
+    try:
+        hour = int(text[11:13])
+    except ValueError:
+        return "Night"
+    for start_hour, end_hour, name in TIME_OF_DAY_BUCKETS:
+        if start_hour <= hour < end_hour:
+            return name
+    return "Night"
+
+
+def cluster_contiguous_scenes(items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group clips by day + time-of-day bucket (Morning/Afternoon/Evening/Night)."""
     ordered = sorted(
         items,
         key=lambda item: (
@@ -594,23 +611,15 @@ def cluster_contiguous_scenes(
         ),
     )
     clusters: list[list[dict[str, Any]]] = []
+    keys: list[tuple[str, str]] = []
     for item in ordered:
-        if not clusters:
-            clusters.append([item])
-            continue
-        previous = clusters[-1][-1]
-        prev_time = _capture_epoch(str(previous.get("_capture_time") or ""))
-        cur_time = _capture_epoch(str(item.get("_capture_time") or ""))
-        prev_setting = str(previous.get("_section_setting") or "other")
-        cur_setting = str(item.get("_section_setting") or "other")
-        if prev_time is None or cur_time is None:
-            gap = float("inf")
-        else:
-            gap = max(0.0, cur_time - prev_time)
-        if cur_setting == prev_setting and gap <= gap_sec:
+        capture_time = str(item.get("_capture_time") or "")
+        key = (capture_time[:10], time_of_day_bucket(capture_time))
+        if clusters and keys[-1] == key:
             clusters[-1].append(item)
         else:
             clusters.append([item])
+            keys.append(key)
     return clusters
 
 
@@ -620,25 +629,32 @@ def rank_clips_within_scene(clips: list[dict[str, Any]]) -> list[dict[str, Any]]
     for clip in clips:
         by_file[str(clip.get("file", ""))].append(clip)
 
-    ranked_files: list[tuple[float, bool, str, str, list[dict[str, Any]]]] = []
+    ranked_files: list[tuple[float, bool, str, str, str, list[dict[str, Any]]]] = []
     for filename, group in by_file.items():
         energy = max(float(item.get("_energy", 0) or 0) for item in group)
         peak = any(bool(item.get("_peak")) for item in group)
         first_time = min(str(item.get("_capture_time") or "9999") for item in group)
+        setting = str(group[0].get("_section_setting") or "other")
         group.sort(
             key=lambda item: (
                 float(item.get("start", 0) or 0),
                 float(item.get("end", 0) or 0),
             )
         )
-        ranked_files.append((energy, peak, first_time, filename, group))
+        ranked_files.append((energy, peak, first_time, filename, setting, group))
 
     ranked_files.sort(key=lambda row: (-row[0], 0 if row[1] else 1, row[2], row[3]))
-    has_peak = any(row[1] for row in ranked_files)
+    # A daypart scene can mix settings (e.g. vehicle + outdoor in the same
+    # morning); only drop weak takes against peaks from their own setting so
+    # merging by time-of-day doesn't wipe out a whole setting's coverage.
+    has_peak_by_setting: dict[str, bool] = defaultdict(bool)
+    for _energy, peak, _first, _filename, setting, _group in ranked_files:
+        if peak:
+            has_peak_by_setting[setting] = True
     ordered: list[dict[str, Any]] = []
-    for energy, peak, _first, _filename, group in ranked_files:
-        # If the scene already has strong kids beats, drop weak transit/adult pads.
-        if has_peak and (not peak) and energy < 0.34:
+    for energy, peak, _first, _filename, setting, group in ranked_files:
+        # If this setting already has strong kids beats, drop its weak pads.
+        if has_peak_by_setting[setting] and (not peak) and energy < 0.34:
             continue
         ordered.extend(group)
     return ordered or clips
@@ -1610,21 +1626,15 @@ def build_balanced_fallback_plan(
                 )
             )
     elif arc == "scene_energy":
-        # Contiguous day scenes (not whole-day setting buckets). Inside each scene,
-        # rank files best→better; keep each file's beats in order.
+        # Simple time-of-day scenes (Morning/Afternoon/Evening/Night), not setting
+        # buckets. Inside each scene, rank files best→better; keep each file's
+        # beats in order.
         for cluster in cluster_contiguous_scenes(middle_items):
             if not cluster:
                 continue
             ranked = rank_clips_within_scene(cluster)
-            # Dominant setting labels the section.
-            setting_counts: dict[str, int] = defaultdict(int)
-            for item in ranked:
-                setting_counts[str(item.get("_section_setting", "other"))] += 1
-            setting = max(
-                setting_counts,
-                key=lambda name: (setting_counts[name], name),
-            )
-            structure.append(_storyboard_section(setting, ranked))
+            daypart = time_of_day_bucket(str(ranked[0].get("_capture_time") or ""))
+            structure.append(_storyboard_section(daypart, ranked))
     else:
         current_setting: str | None = None
         current_clips: list[dict[str, Any]] = []
@@ -1891,6 +1901,14 @@ def _save_plan(
         episode.approval_path.unlink()
     cue_count = len(plan.get("audio_cues") or [])
     print(f"Wrote {episode.plan_path} ({plan['duration_sec']:.1f}s, {cue_count} SFX cues)")
+    duration_sec = float(plan.get("duration_sec") or 0)
+    if duration_sec < MIN_RECOMMENDED_DURATION_SEC:
+        minutes = duration_sec / 60.0
+        print(
+            f"Warning: plan is only {minutes:.1f} min, below the 7 min minimum. "
+            "Loosen the cut for more runtime — set a higher target_duration_sec "
+            "(e.g. 480 or more) in the episode config and re-run 've plan'."
+        )
     return plan
 
 

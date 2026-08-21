@@ -12,8 +12,16 @@ DEFAULT_CAPTIONS: dict[str, Any] = {
     "max_cue_sec": 4.5,
     "min_cue_sec": 0.7,
     "font_name": "Arial",
-    "font_size": 48,
+    "font_size": 64,
+    "bold": True,
     "margin_v": 64,
+    # Karaoke-style burned-in captions: words highlight in primary_color as they
+    # are spoken, outlined in outline_color, sized for easy reading.
+    "karaoke": True,
+    "primary_color": "#FF2D78",
+    "secondary_color": "#FFFFFF",
+    "outline_color": "#FFFFFF",
+    "outline_width": 4,
 }
 
 
@@ -49,6 +57,20 @@ def _clean_caption_text(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
     cleaned = cleaned.replace("-->", "->")
     return cleaned
+
+
+def _hex_to_ass_color(hex_color: str) -> str:
+    """Convert '#RRGGBB' to ASS '&HAABBGGRR' (opaque)."""
+    text = str(hex_color or "").strip().lstrip("#")
+    if len(text) != 6:
+        text = "FFFFFF"
+    red, green, blue = text[0:2], text[2:4], text[4:6]
+    return f"&H00{blue}{green}{red}".upper()
+
+
+def _escape_ass_word(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    return cleaned.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
 
 
 def _escape_ass_text(text: str) -> str:
@@ -129,6 +151,37 @@ def _words_for_selection(
     return selected
 
 
+def _wrap_words_into_lines(
+    words: list[dict[str, Any]],
+    *,
+    max_chars: int,
+    max_lines: int,
+) -> list[list[dict[str, Any]]]:
+    """Greedy word-boundary wrap into at most max_lines lines of max_chars each."""
+    lines: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_len = 0
+    for word in words:
+        text = str(word["text"])
+        added = len(text) + (1 if current else 0)
+        if current and current_len + added > max_chars:
+            lines.append(current)
+            current = [word]
+            current_len = len(text)
+        else:
+            current.append(word)
+            current_len += added
+    if current:
+        lines.append(current)
+    limit = max(1, int(max_lines))
+    if len(lines) > limit:
+        kept = lines[: limit - 1] if limit > 1 else []
+        overflow = [word for line in lines[limit - 1 :] for word in line]
+        kept.append(overflow)
+        lines = kept
+    return lines
+
+
 def _pack_words_into_cues(
     words: list[dict[str, Any]],
     *,
@@ -158,22 +211,21 @@ def _pack_words_into_cues(
         end = timeline_offset + (float(current_words[-1]["end"]) - clip_start)
         if end - start < min_cue_sec:
             end = start + min_cue_sec
-        # Soft wrap into up to max_lines.
-        pieces: list[str] = []
-        remaining = text
-        for _ in range(max(1, int(max_lines))):
-            if len(remaining) <= max_chars:
-                pieces.append(remaining)
-                remaining = ""
-                break
-            cut = remaining.rfind(" ", 0, max_chars + 1)
-            if cut < max(8, max_chars // 3):
-                cut = max_chars
-            pieces.append(remaining[:cut].strip())
-            remaining = remaining[cut:].strip()
-        if remaining:
-            pieces[-1] = _clean_caption_text(f"{pieces[-1]} {remaining}")
-        cues.append({"start": start, "end": end, "text": "\n".join(pieces)})
+        lines = _wrap_words_into_lines(current_words, max_chars=max_chars, max_lines=max_lines)
+        timeline_words: list[dict[str, Any]] = []
+        for line_index, line in enumerate(lines):
+            for word_index, word in enumerate(line):
+                timeline_words.append(
+                    {
+                        "text": str(word["text"]),
+                        "start": timeline_offset + (float(word["start"]) - clip_start),
+                        "end": timeline_offset + (float(word["end"]) - clip_start),
+                        "line_break_after": word_index == len(line) - 1
+                        and line_index < len(lines) - 1,
+                    }
+                )
+        text = "\n".join(" ".join(str(word["text"]) for word in line) for line in lines)
+        cues.append({"start": start, "end": end, "text": text, "words": timeline_words})
         current_words = []
 
     for word in words:
@@ -252,7 +304,15 @@ def build_caption_cues(
             start = float(cleaned[-1]["end"])
             if end - start < 0.35:
                 continue
-        cleaned.append({"start": round(start, 3), "end": round(end, 3), "text": text})
+        words = [dict(word) for word in cue.get("words", []) or []]
+        cleaned.append(
+            {
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "text": text,
+                "words": words,
+            }
+        )
     return cleaned
 
 
@@ -268,6 +328,30 @@ def write_srt(cues: list[dict[str, Any]], path: Path) -> Path:
     return path
 
 
+def _karaoke_ass_text(words: list[dict[str, Any]]) -> str:
+    """Build ASS text with per-word {\\k<centiseconds>} highlight tags and \\N line breaks."""
+    lines: list[str] = []
+    tokens: list[str] = []
+    prev_end: float | None = None
+    for word in words:
+        start = float(word.get("start", 0))
+        end = float(word.get("end", start))
+        if prev_end is not None:
+            gap_cs = round((start - prev_end) * 100)
+            if gap_cs > 2:
+                tokens.append(f"{{\\k{gap_cs}}}")
+        duration_cs = max(1, round((end - start) * 100))
+        text = _escape_ass_word(str(word.get("text", "")))
+        tokens.append(f"{{\\k{duration_cs}}}{text}")
+        prev_end = end
+        if word.get("line_break_after"):
+            lines.append(" ".join(tokens))
+            tokens = []
+    if tokens:
+        lines.append(" ".join(tokens))
+    return r"\N".join(lines)
+
+
 def write_ass(
     cues: list[dict[str, Any]],
     path: Path,
@@ -275,9 +359,19 @@ def write_ass(
     width: int,
     height: int,
     font_name: str = "Arial",
-    font_size: int = 48,
+    font_size: int = 64,
     margin_v: int = 64,
+    bold: bool = True,
+    karaoke: bool = True,
+    primary_color: str = "#FF2D78",
+    secondary_color: str = "#FFFFFF",
+    outline_color: str = "#FFFFFF",
+    outline_width: int = 4,
 ) -> Path:
+    primary = _hex_to_ass_color(primary_color)
+    secondary = _hex_to_ass_color(secondary_color)
+    outline = _hex_to_ass_color(outline_color)
+    bold_flag = -1 if bold else 0
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {int(width)}
@@ -287,18 +381,23 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{int(font_size)},&H00FFFFFF,&H000000FF,&H00101010,&H80000000,0,0,0,0,100,100,0,0,1,3,1,2,80,80,{int(margin_v)},1
+Style: Default,{font_name},{int(font_size)},{primary},{secondary},{outline},&H80000000,{bold_flag},0,0,0,100,100,0,0,1,{int(outline_width)},1,2,80,80,{int(margin_v)},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     events = []
     for cue in cues:
+        words = cue.get("words") or []
+        if karaoke and words:
+            text = _karaoke_ass_text(words)
+        else:
+            text = _escape_ass_text(str(cue["text"]))
         events.append(
             "Dialogue: 0,"
             f"{_ass_time(float(cue['start']))},"
             f"{_ass_time(float(cue['end']))},"
-            f"Default,,0,0,0,,{_escape_ass_text(str(cue['text']))}"
+            f"Default,,0,0,0,,{text}"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(header + "\n".join(events) + ("\n" if events else ""), encoding="utf-8")
@@ -343,8 +442,14 @@ def prepare_caption_files(
             width=int(episode.config["output"]["width"]),
             height=int(episode.config["output"]["height"]),
             font_name=str(config.get("font_name", "Arial")),
-            font_size=int(config.get("font_size", 48)),
+            font_size=int(config.get("font_size", 64)),
             margin_v=int(config.get("margin_v", 64)),
+            bold=bool(config.get("bold", True)),
+            karaoke=bool(config.get("karaoke", True)),
+            primary_color=str(config.get("primary_color", "#FF2D78")),
+            secondary_color=str(config.get("secondary_color", "#FFFFFF")),
+            outline_color=str(config.get("outline_color", "#FFFFFF")),
+            outline_width=int(config.get("outline_width", 4)),
         )
     return {
         "enabled": True,
