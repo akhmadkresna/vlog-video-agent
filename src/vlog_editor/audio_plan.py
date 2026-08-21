@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from vlog_editor.audio_pack import (
+    HYPE_VOICE_ROLES,
     MEME_ROLES,
     ensure_audio_pack_layout,
+    hype_voice_files_for_role,
     load_audio_pack,
     meme_files_for_role,
     resolve_pack_file,
@@ -155,6 +157,9 @@ def text_looks_like_adult_meal(text: str) -> bool:
 
 
 MAX_MEME_PER_TOTAL = 14.0
+# Spoken hype words read as more repetitive than punctuation SFX, so space
+# them out further than meme cues.
+MAX_HYPE_PER_TOTAL = 22.0
 
 INTRO_SEC = 8.0
 OUTRO_SEC = 8.0
@@ -611,10 +616,12 @@ def plan_audio_cues(
     total = float(plan.get("duration_sec") or timeline[-1]["edit_end"])
     max_cues = max(1, int(total / 8))
     max_meme = max(2, int(total / MAX_MEME_PER_TOTAL))
+    max_hype = max(1, int(total / MAX_HYPE_PER_TOTAL))
 
     cues: list[dict[str, Any]] = []
     salt = 0
     meme_count = 0
+    hype_count = 0
 
     def add_cue(
         cue_types: str | list[str],
@@ -622,8 +629,8 @@ def plan_audio_cues(
         reason: str,
         item: dict[str, Any],
     ) -> bool:
-        """Try cue types in order (classic folder or meme role). Returns True if placed."""
-        nonlocal salt, meme_count
+        """Try cue types in order (classic folder, meme role, or hype voice role)."""
+        nonlocal salt, meme_count, hype_count
         if len(cues) >= max_cues:
             return False
         at_sec = max(0.0, min(total - 0.05, at_sec))
@@ -635,11 +642,17 @@ def plan_audio_cues(
         candidates = [cue_types] if isinstance(cue_types, str) else list(cue_types)
         for cue_type in candidates:
             is_meme = cue_type in MEME_ROLES
+            is_hype = cue_type in HYPE_VOICE_ROLES
             if is_meme and meme_count >= max_meme:
+                continue
+            if is_hype and hype_count >= max_hype:
                 continue
             if is_meme:
                 block = pack["sfx"].get("meme", {})
                 files = meme_files_for_role(pack, cue_type)
+            elif is_hype:
+                block = pack["sfx"].get("hype_voice", {})
+                files = hype_voice_files_for_role(pack, cue_type)
             else:
                 block = pack["sfx"].get(cue_type, {})
                 files = list(block.get("files", []) or [])
@@ -665,6 +678,9 @@ def plan_audio_cues(
             if is_meme:
                 cue["role"] = cue_type
                 meme_count += 1
+            elif is_hype:
+                cue["role"] = cue_type
+                hype_count += 1
             cues.append(cue)
             return True
         return False
@@ -697,7 +713,7 @@ def plan_audio_cues(
             )
         elif FAIL_RE.search(text):
             add_cue(
-                ["bruh", "fail"],
+                ["okay", "bruh", "fail"],
                 item["edit_start"] + min(0.8, item["duration"] * 0.25),
                 "soft mishap moment",
                 item,
@@ -706,21 +722,35 @@ def plan_audio_cues(
             item["story_value"] >= 0.75 and CUTE_RE.search(text)
         ):
             add_cue(
-                ["goofy_laugh", "sparkle"],
+                ["yay", "goofy_laugh", "sparkle"],
                 item["edit_start"] + min(1.2, item["duration"] * 0.35),
                 "cute or laugh moment",
                 item,
             )
+        elif kids_audience_categories(text) and item["story_value"] >= 0.6:
+            categories = set(kids_audience_categories(text))
+            if "discovery" in categories:
+                roles = ["wow", "yay", "sparkle"]
+            elif categories & {"water_play", "ride_fun", "play_structure"}:
+                roles = ["woohoo", "lets_go", "boing"]
+            else:
+                roles = ["yay", "sparkle"]
+            add_cue(
+                roles,
+                item["edit_start"] + min(1.0, item["duration"] * 0.3),
+                "kids-interest hype moment",
+                item,
+            )
         elif item["duration"] <= 8 and item["story_value"] >= 0.7:
             add_cue(
-                ["click", "pop", "boing"],
+                ["yes", "click", "pop", "boing"],
                 item["edit_start"] + min(0.5, item["duration"] * 0.2),
                 "short punchy clip",
                 item,
             )
         elif item["duration"] > 20 and item["quality"] >= 0.7:
             add_cue(
-                ["boing", "boom"],
+                ["lets_go", "boing", "boom"],
                 item["edit_start"] + item["duration"] * 0.55,
                 "mid-clip energy beat",
                 item,
