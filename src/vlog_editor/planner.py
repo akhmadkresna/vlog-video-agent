@@ -1739,22 +1739,32 @@ def resolve_target_duration(
     total_duration = sum(
         max(0.0, float(clip.get("metadata", {}).get("duration", 0))) for clip in pool
     )
-    scores = [_clip_score(clip) for clip in pool]
-    average_score = sum(scores) / len(scores) if scores else 0.5
-    playful_duration = sum(
-        max(0.0, float(clip.get("metadata", {}).get("duration", 0)))
-        for clip in pool
-        if is_playful_source(clip)
-    )
-    play_ratio = playful_duration / total_duration if total_duration else 0.0
 
-    # Ordinary travel B-roll ~16%; play-heavy kids days keep more fooling-around
-    # narration so scenes feel complete (up to ~28% of planning-pool footage).
-    retain = 0.16 + 0.12 * min(1.0, play_ratio * 1.6)
-    target = total_duration * retain * (0.75 + 0.25 * average_score)
-    # Multi-day pools can support longer edits than a single capture day.
-    duration_cap = 1200.0 if scope == "all_days" else 720.0
-    target = min(target, total_duration * 0.8, duration_cap)
+    # Target how much footage is actually worth keeping, not a fixed slice of
+    # total raw footage — a shoot that's mostly strong content shouldn't lose
+    # most of it just because that's most of what you shot. Each clip's
+    # duration counts toward the budget in proportion to its _clip_score:
+    # near-zero below WORTHY_LOW (weak/filler), full credit at/above
+    # WORTHY_HIGH (clearly worth keeping), linear in between.
+    WORTHY_LOW = 0.35
+    WORTHY_HIGH = 0.85
+    worthy_duration = 0.0
+    for clip in pool:
+        duration = max(0.0, float(clip.get("metadata", {}).get("duration", 0)))
+        score = _clip_score(clip)
+        if score <= WORTHY_LOW:
+            weight = 0.0
+        elif score >= WORTHY_HIGH:
+            weight = 1.0
+        else:
+            weight = (score - WORTHY_LOW) / (WORTHY_HIGH - WORTHY_LOW)
+        worthy_duration += duration * weight
+
+    # Cap is a pacing ceiling (how long a final video should run), not a
+    # discard mechanism — abundant good footage should fill it, not be
+    # rationed down to a fraction of it.
+    duration_cap = 2700.0 if scope == "all_days" else 1800.0
+    target = min(worthy_duration, duration_cap)
     if total_duration >= 150:
         target = max(target, 120.0)
     else:
