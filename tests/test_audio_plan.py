@@ -461,6 +461,6 @@ def test_render_graph_includes_sfx_adelay_and_mix(
     }
     monkeypatch.setattr("vlog_editor.render.probe_video", lambda _: {"has_audio": True})
     monkeypatch.setattr("vlog_editor.render._encoder", lambda: ("libx264", ["-crf", "18"]))
-    _, filters = build_render_command(episode, plan, episode.output / "final.mp4")
+    _, filters, _ = build_render_command(episode, plan, episode.output / "final.mp4")
     assert "adelay=500|500" in filters
     assert "[acat][sfxmix]amix=inputs=2" in filters

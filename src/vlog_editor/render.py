@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,12 @@ from vlog_editor.captions import ffmpeg_subtitles_path, prepare_caption_files
 from vlog_editor.dashboard import require_approval
 from vlog_editor.media import probe_video, run
 from vlog_editor.project import Episode, read_json, write_json
+from vlog_editor.transitions import (
+    bundled_font_path,
+    plan_time_skip_cards,
+    shift_time,
+    transitions_config,
+)
 from vlog_editor.validation import validate_audio_plan, validate_render_sources
 
 
@@ -25,13 +32,25 @@ def _resolve_audio_path(episode: Episode, relative: str) -> Path:
     return episode.root / relative
 
 
+def _escape_drawtext_value(text: str) -> str:
+    """Escape a drawtext filter option value (wrapped in single quotes)."""
+    return (
+        str(text)
+        .replace("\\", "\\\\")
+        .replace("'", r"\'")
+        .replace(":", r"\:")
+        .replace("%", r"\%")
+    )
+
+
 def build_render_command(
     episode: Episode,
     plan: dict[str, Any],
     output: Path,
     *,
     burn_in_captions: Path | None = None,
-) -> tuple[list[str], str]:
+    time_skip_cards: list[dict[str, Any]] | None = None,
+) -> tuple[list[str], str, float]:
     width = int(episode.config["output"]["width"])
     height = int(episode.config["output"]["height"])
     fps = int(episode.config["output"]["fps"])
@@ -40,6 +59,11 @@ def build_render_command(
     ]
     if not selections:
         raise ValueError("Edit plan has no clips")
+
+    cards = time_skip_cards or []
+    cards_by_index: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for card in cards:
+        cards_by_index[int(card["after_index"])].append(card)
 
     command = ["ffmpeg", "-y", "-hide_banner"]
     metadata: list[dict[str, Any]] = []
@@ -50,7 +74,9 @@ def build_render_command(
         command += ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)]
         metadata.append({"duration": duration, "has_audio": probe_video(source)["has_audio"]})
 
-    total = sum(item["duration"] for item in metadata)
+    content_total = sum(item["duration"] for item in metadata)
+    card_total = sum(float(card["duration"]) for card in cards)
+    total = content_total + card_total
     cues = [cue for cue in plan.get("audio_cues", []) or [] if isinstance(cue, dict)]
     cue_paths: list[Path] = []
     for cue in cues:
@@ -97,8 +123,12 @@ def build_render_command(
     for path in bgm_input_paths:
         command += ["-stream_loop", "-1", "-i", str(path)]
 
+    transitions = transitions_config(episode.config)
+    font_path = ffmpeg_subtitles_path(bundled_font_path())
+
     filters: list[str] = []
     concat_inputs: list[str] = []
+    card_counter = 0
     for index, item in enumerate(metadata):
         duration = item["duration"]
         filters.append(
@@ -122,9 +152,31 @@ def build_render_command(
             )
         concat_inputs.append(f"[v{index}][a{index}]")
 
+        for card in cards_by_index.get(index, []):
+            label = f"card{card_counter}"
+            card_counter += 1
+            card_duration = float(card["duration"])
+            escaped_text = _escape_drawtext_value(str(card["label"]))
+            font_size = max(24, round(height * 0.08))
+            filters.append(
+                f"color=c={transitions['bg_color']}:s={width}x{height}:"
+                f"d={card_duration:.3f}:r={fps},format=yuv420p,setsar=1[v{label}raw]"
+            )
+            filters.append(
+                f"[v{label}raw]drawtext=fontfile='{font_path}':text='{escaped_text}':"
+                f"fontsize={font_size}:fontcolor={transitions['text_color']}:"
+                "borderw=3:bordercolor=black@0.85:x=(w-text_w)/2:y=(h-text_h)/2"
+                f"[v{label}]"
+            )
+            filters.append(
+                f"anullsrc=r=48000:cl=stereo,atrim=duration={card_duration:.3f},"
+                f"asetpts=PTS-STARTPTS[a{label}]"
+            )
+            concat_inputs.append(f"[v{label}][a{label}]")
+
     filters.append(
         "".join(concat_inputs)
-        + f"concat=n={len(selections)}:v=1:a=1[vcat][acat]"
+        + f"concat=n={len(selections) + len(cards)}:v=1:a=1[vcat][acat]"
     )
 
     video_map = "[vcat]"
@@ -141,7 +193,7 @@ def build_render_command(
         sfx_labels: list[str] = []
         for offset, cue in enumerate(cues):
             input_index = next_input + offset
-            delay_ms = max(0, round(float(cue["at_sec"]) * 1000))
+            delay_ms = max(0, round(shift_time(float(cue["at_sec"]), cards) * 1000))
             gain = float(cue.get("gain", 0.5))
             label = f"sfx{offset}"
             filters.append(
@@ -181,8 +233,8 @@ def build_render_command(
             bed_labels: list[str] = []
             for offset, segment in enumerate(bgm_segments):
                 input_index = next_input + bgm_segment_input_indexes[offset]
-                start = float(segment["start_sec"])
-                end = float(segment["end_sec"])
+                start = shift_time(float(segment["start_sec"]), cards)
+                end = shift_time(float(segment["end_sec"]), cards)
                 seg_dur = max(0.05, end - start)
                 fade = min(0.6, seg_dur / 3.0)
                 fade_out = max(0.0, seg_dur - fade)
@@ -258,7 +310,7 @@ def build_render_command(
         "+faststart",
         str(output),
     ]
-    return command, ";\n".join(filters)
+    return command, ";\n".join(filters), total
 
 
 def verify_output(path: Path, expected_duration: float, fps: int) -> dict[str, Any]:
@@ -330,11 +382,25 @@ def render_episode(episode: Episode) -> Path:
     episode.output.mkdir(parents=True, exist_ok=True)
     output = episode.output / "final.mp4"
 
+    transitions = transitions_config(episode.config)
+    time_skip_cards: list[dict[str, Any]] = []
+    if transitions.get("enabled", True):
+        time_skip_cards = plan_time_skip_cards(
+            plan,
+            interval_sec=float(transitions.get("interval_sec", 300.0)),
+            card_duration=float(transitions.get("card_duration", 2.0)),
+        )
+        if time_skip_cards:
+            print(f"Time-skip cards: {len(time_skip_cards)} inserted (~every "
+                  f"{float(transitions.get('interval_sec', 300.0)) / 60:.0f} min)")
+
     burn_in_path: Path | None = None
     caption_meta: dict[str, Any] = {"enabled": False, "cues": 0}
     if episode.analysis_path.is_file():
         analysis = read_json(episode.analysis_path)
-        caption_meta = prepare_caption_files(episode, plan, analysis)
+        caption_meta = prepare_caption_files(
+            episode, plan, analysis, time_skip_cards=time_skip_cards
+        )
         if caption_meta.get("enabled") and caption_meta.get("burn_in"):
             burn_in_path = Path(str(caption_meta["ass_path"]))
         if caption_meta.get("enabled"):
@@ -345,19 +411,20 @@ def render_episode(episode: Episode) -> Path:
     elif bool((episode.config.get("captions") or {}).get("enabled", True)):
         print("Captions skipped: missing clip analysis (run `ve analyze` first).")
 
-    command, filter_script = build_render_command(
+    command, filter_script, output_duration = build_render_command(
         episode,
         plan,
         output,
         burn_in_captions=burn_in_path,
+        time_skip_cards=time_skip_cards,
     )
     filter_path = episode.work / "render_filter.txt"
     filter_path.write_text(filter_script, encoding="utf-8")
-    print(f"Rendering {float(plan['duration_sec']):.1f}s with {command[command.index('-c:v') + 1]}...")
+    print(f"Rendering {output_duration:.1f}s with {command[command.index('-c:v') + 1]}...")
     run(command)
     report = verify_output(
         output,
-        float(plan["duration_sec"]),
+        output_duration,
         int(episode.config["output"]["fps"]),
     )
     report["captions"] = {
@@ -366,6 +433,10 @@ def render_episode(episode: Episode) -> Path:
         "cues": int(caption_meta.get("cues") or 0),
         "srt": caption_meta.get("srt_path"),
     }
+    report["time_skip_cards"] = [
+        {"label": card["label"], "content_time": round(float(card["content_time"]), 3)}
+        for card in time_skip_cards
+    ]
     write_json(episode.output / "verification.json", report)
     print(f"Wrote {output}")
     if caption_meta.get("srt_path"):
