@@ -1763,7 +1763,7 @@ def resolve_target_duration(
     # Cap is a pacing ceiling (how long a final video should run), not a
     # discard mechanism — abundant good footage should fill it, not be
     # rationed down to a fraction of it.
-    duration_cap = 1200.0 if scope == "all_days" else 720.0
+    duration_cap = 2700.0 if scope == "all_days" else 1800.0
     target = min(worthy_duration, duration_cap)
     if total_duration >= 150:
         target = max(target, 120.0)

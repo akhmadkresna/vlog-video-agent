@@ -56,10 +56,10 @@ def test_auto_target_scales_with_unique_usable_footage() -> None:
         _clip("b.mov", 900, transcript="different spoken content"),
     ]
     target, mode = resolve_target_duration("auto", {"clips": clips})
-    # 1800s of unique, solidly-scored (0.8) footage is well above the pacing
-    # cap (720s single-day) worth of "keep this" content, so the target fills
-    # the cap rather than being rationed down to a fixed slice of the total.
-    assert target == 720
+    # 1800s of unique, solidly-scored (0.8) footage is worth keeping ~90% of
+    # (weight 0.9 each), well under the 1800s single-day pacing cap, so the
+    # target tracks the worthy content instead of a fixed slice of the total.
+    assert target == 1620
     assert mode == "auto"
 
 
