@@ -56,8 +56,32 @@ def test_auto_target_scales_with_unique_usable_footage() -> None:
         _clip("b.mov", 900, transcript="different spoken content"),
     ]
     target, mode = resolve_target_duration("auto", {"clips": clips})
-    assert target == 270
+    # 1800s of unique, solidly-scored (0.8) footage is well above the pacing
+    # cap (720s single-day) worth of "keep this" content, so the target fills
+    # the cap rather than being rationed down to a fixed slice of the total.
+    assert target == 720
     assert mode == "auto"
+
+
+def test_auto_target_keeps_most_of_a_short_but_strong_shoot() -> None:
+    # A user shoots only 10 minutes, but all of it is clearly worth keeping
+    # (children on camera, playful, high quality/story value). The target
+    # should track that ~10 minutes, not an arbitrary ~16-28% slice of it.
+    clips = [
+        _clip(
+            f"clip{i}.mov",
+            120,
+            transcript=f"anak main seru ketawa beat {i}",
+            quality=0.9,
+            story_value=0.9,
+        )
+        for i in range(5)
+    ]
+    for clip in clips:
+        clip["visual"]["subjects"] = ["children"]
+    target, mode = resolve_target_duration("auto", {"clips": clips})
+    assert mode == "auto"
+    assert target >= 540  # kept at least 90% of the 600s shoot
 
 
 def test_auto_target_remains_feasible_for_short_footage() -> None:
