@@ -108,9 +108,16 @@ def test_create_episode_seeds_bundled_defaults(tmp_path: Path) -> None:
     assert pack["errors"] == []
     assert pack["sfx"]["boing"]["files"]
     assert pack["sfx"]["meme"]["files"]
-    # Kid-voice hype ships empty by default (see SOURCES.md for why); the
+    # Kid-voice hype ships with real CC0 kid-laughter clips for `yay` only;
+    # the spoken-word roles ship empty (see SOURCES.md for why) and the
     # planner falls back to classic/meme cues until the user drops files in.
-    assert pack["sfx"]["hype_voice"]["files"] == []
+    hype_roles = {entry["role"] for entry in pack["sfx"]["hype_voice"]["files"]}
+    assert hype_roles == {"yay"}
+    assert all(
+        entry["license"] == "cc0" for entry in pack["sfx"]["hype_voice"]["files"]
+    )
+    for entry in pack["sfx"]["hype_voice"]["files"]:
+        assert (episode.root / "audio" / entry["file"]).is_file()
     assert {entry["role"] for entry in pack["sfx"]["meme"]["files"]} >= {
         "boom",
         "bruh",
@@ -358,9 +365,10 @@ def test_seeded_defaults_produce_license_free_cues(tmp_path: Path) -> None:
     planned = plan_audio_cues(episode, _plan(), _analysis())
     cues = planned.get("audio_cues") or []
     assert cues
-    # Default pack uses meme click/boom for transitions; goofy_laugh for laughs.
+    # Default pack uses meme click/boom for transitions; yay (bundled kid
+    # laughter) wins over goofy_laugh/sparkle for laughs since it's tried first.
     assert any(cue["type"] in {"click", "boom", "whoosh"} for cue in cues)
-    assert any(cue["type"] in {"goofy_laugh", "sparkle"} for cue in cues)
+    assert any(cue["type"] in {"yay", "goofy_laugh", "sparkle"} for cue in cues)
     assert all(cue["license"] in {"cc0", "user_provided"} for cue in cues)
     bgm = planned.get("bgm")
     assert isinstance(bgm, dict)

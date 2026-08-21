@@ -71,15 +71,25 @@ sfx:
         attribution: null
         source_url: https://kenney.nl/assets/interface-sounds
   hype_voice:
-    # Kid voice hype ("yes!", "okay!", "yay!", "woohoo!", "let's go!", "wow!").
-    # Not bundled: like meme/, these single-word reaction clips are usually
-    # soundboard/meme drops without clear redistribution rights. Drop your
-    # own license-free-only files under sfx/hype_voice/ and list them below
-    # with a role from: yes, okay, yay, woohoo, lets_go, wow. See SOURCES.md
-    # for a starting list of places to look. Kept quiet by default (0.35) so
-    # it punctuates footage without talking over the kids on camera.
+    # Kid voice hype. `yay` ships with real CC0 kid laughter/giggle reactions
+    # (genuine children, verified license, no exact words). Spoken-word roles
+    # (yes/okay/woohoo/lets_go/wow) ship empty: those single-word "yes!"/
+    # "let's go!" clips are almost always soundboard/meme drops without clear
+    # redistribution rights, so add your own under sfx/hype_voice/ — see
+    # SOURCES.md for a starting list of places to look. Kept quiet by default
+    # (0.35) so it punctuates footage without talking over the kids on camera.
     gain: 0.35
-    files: []
+    files:
+      - file: sfx/hype_voice/bsb_laughing_boy_16_months.mp3
+        role: yay
+        license: cc0
+        attribution: null
+        source_url: https://bigsoundbank.com/laughing-boy-of-16-months-s0980.html
+      - file: sfx/hype_voice/bsb_laughter_of_children.mp3
+        role: yay
+        license: cc0
+        attribution: null
+        source_url: https://bigsoundbank.com/laughter-of-children-s1660.html
   meme:
     gain: 0.55
     files:

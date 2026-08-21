@@ -27,19 +27,23 @@ music or SFX.
 | `sparkle` / `success` | [Kenney](https://kenney.nl/assets/interface-sounds) (CC0) |
 | `pop` / `whoosh` / `rimshot` / `fail` | Optional classic slots (empty in default) |
 | `click` / `boom` / `bruh` / `goofy_laugh` / `fart` | `sfx/meme/` (`user_provided`) |
-| `yes` / `okay` / `yay` / `woohoo` / `lets_go` / `wow` | `sfx/hype_voice/` (`user_provided`, empty by default) |
+| `yay` | [BigSoundBank](https://bigsoundbank.com/) kid laughter (CC0, bundled) |
+| `yes` / `okay` / `woohoo` / `lets_go` / `wow` | `sfx/hype_voice/` (`user_provided`, empty by default) |
 
 Meme files stay in one folder (`sfx/meme/`) and declare a `role` in `pack.yaml`.
 The planner tries meme roles first, then classic types, with a meme density cap.
 
 Kid-voice hype works the same way, in its own `sfx/hype_voice/` folder — short
-spoken exclamations the planner fires on strong kids-energy beats (play,
+kid-voice reactions the planner fires on strong kids-energy beats (play,
 discovery, water play, rides, cute/laugh moments), kept quiet by default
-(gain 0.35) and capped further than meme (~1 per 22s) so a repeated word
-doesn't get grating. It's empty by default: these single-word clips are
-almost always soundboard/meme sourced with unclear redistribution rights, so
-none ship out of the box — see `SOURCES.md` for where to find license-free
-ones (Pixabay, BigSoundBank, Freesound filtered to CC0).
+(gain 0.35) and capped further than meme (~1 per 22s) so a repeated cue
+doesn't get grating. The `yay` role ships with two real CC0 kid-laughter
+clips from BigSoundBank (verified, no login/paywall). The other five roles
+ship empty: literal spoken words like "yes!" or "let's go!" are almost
+always soundboard/meme sourced with unclear redistribution rights, and the
+one site found with real recordings of those words (Pixabay) sits behind
+Cloudflare bot protection — see `SOURCES.md` for where to look and add your
+own under `sfx/hype_voice/`.
 
 ### Bundled BGM (Pixabay Content License)
 
