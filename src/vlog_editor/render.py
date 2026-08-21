@@ -5,6 +5,15 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from vlog_editor.audio_pack import (
+    HYPE_VOICE_ROLES,
+    MEME_ROLES,
+    ensure_audio_pack_layout,
+    hype_voice_files_for_role,
+    load_audio_pack,
+    meme_files_for_role,
+    resolve_pack_file,
+)
 from vlog_editor.captions import ffmpeg_subtitles_path, prepare_caption_files
 from vlog_editor.dashboard import require_approval
 from vlog_editor.media import probe_video, run
@@ -16,6 +25,49 @@ from vlog_editor.transitions import (
     transitions_config,
 )
 from vlog_editor.validation import validate_audio_plan, validate_render_sources
+
+
+def _transition_sfx_cues(
+    episode: Episode,
+    cards: list[dict[str, Any]],
+    transitions: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """One SFX cue per time-skip card, in the same content-time domain as
+    plan['audio_cues'] so it rides the existing shift_time/adelay handling."""
+    sfx_type = str(transitions.get("sfx_type") or "").strip()
+    if not cards or not sfx_type:
+        return []
+    ensure_audio_pack_layout(episode.root)
+    pack_rel = str(episode.config.get("audio", {}).get("pack", "audio/pack.yaml"))
+    pack = load_audio_pack(episode.root, pack_rel)
+    if sfx_type in MEME_ROLES:
+        block = pack["sfx"].get("meme", {})
+        files = meme_files_for_role(pack, sfx_type)
+    elif sfx_type in HYPE_VOICE_ROLES:
+        block = pack["sfx"].get("hype_voice", {})
+        files = hype_voice_files_for_role(pack, sfx_type)
+    else:
+        block = pack["sfx"].get(sfx_type, {})
+        files = list(block.get("files", []) or [])
+    if not files:
+        return []
+    chosen = files[0]
+    relative = str(chosen["file"])
+    if not relative.startswith("audio/"):
+        relative = f"audio/{relative.lstrip('/')}"
+    path = resolve_pack_file(episode.root, relative)
+    if not path.is_file():
+        return []
+    gain = float(transitions.get("sfx_gain") or chosen.get("gain", block.get("gain", 0.5)))
+    return [
+        {
+            "at_sec": float(card["content_time"]),
+            "file": relative.replace("\\", "/"),
+            "gain": gain,
+            "type": sfx_type,
+        }
+        for card in cards
+    ]
 
 
 def _encoder() -> tuple[str, list[str]]:
@@ -77,7 +129,10 @@ def build_render_command(
     content_total = sum(item["duration"] for item in metadata)
     card_total = sum(float(card["duration"]) for card in cards)
     total = content_total + card_total
+    transitions = transitions_config(episode.config)
     cues = [cue for cue in plan.get("audio_cues", []) or [] if isinstance(cue, dict)]
+    cues += _transition_sfx_cues(episode, cards, transitions)
+    cues.sort(key=lambda cue: float(cue["at_sec"]))
     cue_paths: list[Path] = []
     for cue in cues:
         path = _resolve_audio_path(episode, str(cue["file"]))
@@ -123,7 +178,6 @@ def build_render_command(
     for path in bgm_input_paths:
         command += ["-stream_loop", "-1", "-i", str(path)]
 
-    transitions = transitions_config(episode.config)
     font_path = ffmpeg_subtitles_path(bundled_font_path())
 
     filters: list[str] = []

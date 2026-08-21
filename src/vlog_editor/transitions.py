@@ -9,6 +9,11 @@ DEFAULT_TRANSITIONS: dict[str, Any] = {
     "card_duration": 2.0,
     "bg_color": "0x1F6FEB",
     "text_color": "white",
+    # Punchy comedic "pop" as each card appears — matches the bundled meme
+    # boom (vine-boom-sound.mp3) by default. Set to "" to disable, or any
+    # other cue type/role from the audio pack (whoosh, click, woohoo, ...).
+    "sfx_type": "boom",
+    "sfx_gain": None,
 }
 
 
@@ -75,8 +80,13 @@ def plan_time_skip_cards(
 
 
 def shift_time(seconds: float, cards: list[dict[str, Any]]) -> float:
-    """Map a content-timeline second to its position once cards are spliced in."""
+    """Map a content-timeline second to its position once cards are spliced in.
+
+    Strictly-before comparison: a value exactly at a card's own content_time
+    (e.g. the card's own SFX cue) lands at the start of that card's slot, not
+    past it — only cards inserted strictly earlier push a value forward.
+    """
     value = float(seconds)
     return value + sum(
-        float(card["duration"]) for card in cards if float(card["content_time"]) <= value + 1e-6
+        float(card["duration"]) for card in cards if float(card["content_time"]) < value - 1e-6
     )

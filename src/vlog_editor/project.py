@@ -72,6 +72,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "card_duration": 2.0,
         "bg_color": "0x1F6FEB",
         "text_color": "white",
+        # Punchy pop as each card appears (bundled meme boom by default).
+        # Set "" to disable, or any other audio-pack cue type/role.
+        "sfx_type": "boom",
+        "sfx_gain": None,
     },
     # Default story shape for balanced plans. Override per episode in project.yaml.
     # scene_energy = time-of-day scenes (Morning/Afternoon/Evening/Night) in capture order; best→better inside

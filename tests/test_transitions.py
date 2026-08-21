@@ -89,7 +89,9 @@ def test_shift_time_accumulates_prior_cards() -> None:
         {"content_time": 250.0, "duration": 3.0},
     ]
     assert shift_time(50.0, cards) == 50.0
-    assert shift_time(100.0, cards) == 102.0
+    # A value exactly at a card's own content_time lands at the start of that
+    # card's slot (not shifted past it) — matters for the card's own SFX cue.
+    assert shift_time(100.0, cards) == 100.0
     assert shift_time(200.0, cards) == 202.0
     assert shift_time(300.0, cards) == 305.0
 
@@ -113,3 +115,23 @@ def test_render_graph_splices_time_skip_card(
     assert "5 minutes later" in filters
     assert "-t" in command
     assert "8.000" in command
+
+
+def test_render_pairs_boom_sfx_with_each_card_at_its_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    episode = _episode(tmp_path)
+    (episode.footage / "clip0.mp4").write_bytes(b"fake")
+    (episode.footage / "clip1.mp4").write_bytes(b"fake")
+    monkeypatch.setattr("vlog_editor.render.probe_video", lambda _: {"has_audio": True})
+    monkeypatch.setattr("vlog_editor.render._encoder", lambda: ("libx264", ["-crf", "18"]))
+    plan = _plan_with_clips([3.0, 3.0])
+    # Card sits at content_time=3.0 (right after clip0 ends). Its boom cue
+    # must land at the card's *start* in the shifted timeline (3.0s), not its
+    # end (5.0s) — regression check for the shift_time off-by-one-card bug.
+    cards = [{"after_index": 0, "content_time": 3.0, "duration": 2.0, "label": "5 minutes later..."}]
+    command, filters, _ = build_render_command(
+        episode, plan, episode.output / "final.mp4", time_skip_cards=cards
+    )
+    assert any("vine-boom-sound.mp3" in part for part in command)
+    assert "adelay=3000|3000" in filters
