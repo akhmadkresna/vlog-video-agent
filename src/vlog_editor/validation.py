@@ -6,6 +6,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from vlog_editor.media import item_daypart
+
 # Order matters: place/activity cues before generic transport words so
 # "Hot Wheels cars in a toy store aisle" stays store, not vehicle.
 # More specific places before generic home/outdoor/vehicle so
@@ -169,11 +171,21 @@ def validate_and_fix_plan(
     structure = fixed.get("structure")
     if not isinstance(structure, list) or not structure:
         return fixed, ["Plan must have a non-empty structure array"]
+    scope = str(fixed.get("planning_scope") or "primary_day").strip().lower().replace("-", "_")
+    all_days_scope = scope in {
+        "all",
+        "all_days",
+        "multi",
+        "multi_day",
+        "multiday",
+        "every_day",
+    }
 
     total = 0.0
     selected_by_file: dict[str, list[tuple[float, float]]] = {}
     ordered_sources: list[dict[str, Any]] = []
     previous_capture_time: str | None = None
+    previous_daypart: int | None = None
     for section_index, section in enumerate(structure):
         if not isinstance(section, dict):
             errors.append(f"Section {section_index + 1} is not an object")
@@ -222,19 +234,39 @@ def validate_and_fix_plan(
                     )
             capture_time = str(source.get("metadata", {}).get("capture_time") or "")
             story_arc = str(fixed.get("story_arc") or "chronological").strip().lower()
-            enforce_chrono = story_arc in {"chronological", "chrono", "capture"}
+            enforce_full_chrono = story_arc in {"chronological", "chrono", "capture"}
+            current_daypart = item_daypart(capture_time, filename)
+            current_order_key = (
+                capture_time
+                if enforce_full_chrono
+                else str(current_daypart)
+                if all_days_scope
+                else ""
+            )
+            previous_order_key = (
+                previous_capture_time
+                if enforce_full_chrono
+                else str(previous_daypart)
+                if all_days_scope and previous_daypart is not None
+                else ""
+            )
             if (
-                enforce_chrono
-                and capture_time
-                and previous_capture_time
-                and capture_time < previous_capture_time
+                current_order_key
+                and previous_order_key
+                and current_order_key < previous_order_key
             ):
                 errors.append(
                     f"{context}: capture time {capture_time} is earlier than previous "
                     f"selection {previous_capture_time}; keep the plan chronological"
+                    if enforce_full_chrono
+                    else (
+                        f"{context}: night/evening beat appears before later daylight; "
+                        "merged days must keep morning → night"
+                    )
                 )
             if capture_time:
                 previous_capture_time = capture_time
+            previous_daypart = current_daypart
             selected_by_file.setdefault(filename, []).append((start, end))
             ordered_sources.append(source)
             clip["start"] = round(start, 3)
@@ -248,14 +280,16 @@ def validate_and_fix_plan(
     fixed.setdefault("bgm_suggestion", "")
     fixed.setdefault("editing_notes", "")
 
-    # Diversity: all_days plans judge against the full analysis pool; otherwise
-    # against the primary capture day represented in the plan so multi-day folders
-    # do not force impossible cross-day montage under primary_day scope.
-    scope = str(fixed.get("planning_scope") or "primary_day").strip().lower().replace("-", "_")
-    if scope in {"all", "all_days", "multi", "multi_day", "multiday", "every_day"}:
+    # all_days plans are labeled against the full analysis pool; otherwise
+    # against the primary capture day represented in the plan so multi-day
+    # folders do not force impossible cross-day montage under primary_day
+    # scope. No setting-diversity requirements beyond this labeling: neither
+    # a per-setting dominance cap nor a minimum-settings-covered floor.
+    # Selection is judged purely on energy/quality (removed per explicit
+    # request — those were rejecting plans for using good footage).
+    if all_days_scope:
         fixed["planning_scope"] = "all_days"
         fixed["planning_day"] = "all_days"
-        diversity_pool = list(clips_by_name.values())
     else:
         day_counts: dict[str, int] = defaultdict(int)
         for source in ordered_sources:
@@ -265,63 +299,7 @@ def validate_and_fix_plan(
         primary_day = max(day_counts, key=day_counts.get) if day_counts else ""
         if primary_day:
             fixed["planning_day"] = primary_day
-            diversity_pool = [
-                clip
-                for clip in clips_by_name.values()
-                if _capture_day(clip) in {"", primary_day}
-            ]
-        else:
-            diversity_pool = list(clips_by_name.values())
         fixed.setdefault("planning_scope", "primary_day")
-
-    available_settings = {
-        infer_setting(clip) for clip in diversity_pool if infer_setting(clip) != "other"
-    }
-    selected_duration_by_setting: dict[str, float] = defaultdict(float)
-    body_duration_by_setting: dict[str, float] = defaultdict(float)
-    bookend_sections = {"greeting open", "playful open", "cta close"}
-    for section in structure:
-        if not isinstance(section, dict):
-            continue
-        section_name = str(section.get("section", "")).strip().lower()
-        is_bookend = section_name in bookend_sections
-        for clip in section.get("clips", []):
-            if not isinstance(clip, dict):
-                continue
-            source = clips_by_name.get(str(clip.get("file", "")))
-            if source is None:
-                continue
-            try:
-                selected_duration = float(clip["end"]) - float(clip["start"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            selected_duration = max(0.0, selected_duration)
-            setting = infer_setting(source)
-            selected_duration_by_setting[setting] += selected_duration
-            if not is_bookend:
-                body_duration_by_setting[setting] += selected_duration
-
-    required_settings = min(4, len(available_settings))
-    selected_available_settings = available_settings.intersection(selected_duration_by_setting)
-    if len(selected_available_settings) < required_settings:
-        errors.append(
-            "Plan covers "
-            f"{len(selected_available_settings)} of {len(available_settings)} available settings; "
-            f"at least {required_settings} are required"
-        )
-    # Open/CTA count toward the denominator but not the numerator, so reserved
-    # bookends do not force kids-peak settings over the 40% cap by themselves.
-    if len(available_settings) >= 3 and total > 0 and body_duration_by_setting:
-        dominant_setting, dominant_duration = max(
-            body_duration_by_setting.items(),
-            key=lambda item: item[1],
-            default=("other", 0.0),
-        )
-        if dominant_duration > total * 0.4:
-            errors.append(
-                f"Setting {dominant_setting!r} consumes "
-                f"{dominant_duration / total:.0%} of the plan; maximum is 40%"
-            )
 
     if target_duration > 0 and abs(total - target_duration) > target_duration * tolerance:
         errors.append(

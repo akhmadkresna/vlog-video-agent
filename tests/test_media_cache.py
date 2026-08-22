@@ -3,7 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 
 from vlog_editor.cache import JsonCache, cache_key
-from vlog_editor.media import sample_times
+from vlog_editor.media import daypart_rank, local_clock, sample_times
+
+
+def test_dji_filename_uses_local_clock_not_utc_capture_time() -> None:
+    hour, minute = local_clock(
+        "2026-08-10T12:53:28.000000Z",
+        "DJI_20260810195327_0005_D.MP4",
+    )
+    assert (hour, minute) == (19, 53)
+    assert daypart_rank(7) == 0
+    assert daypart_rank(12) == 1
+    assert daypart_rank(19) == 2
+    assert daypart_rank(22) == 3
 
 
 def test_sample_times_follow_clip_duration_policy() -> None:

@@ -35,14 +35,11 @@ Use the `ve` CLI. Do not recreate its media logic in ad-hoc scripts.
 - Never bypass the plan-hash approval gate.
 - Never cut through a spoken word; retain validator corrections.
 - Default to one primary capture day. For longer multi-day edits, set
-  `planning_scope: all_days` in that episode's `project.yaml`. Merged days are
-  assembled as one composite day — morning → midday → evening → night — so
-  night-home never jumps in right after a morning greeting when later daylight
-  still exists. Calendar order is kept only inside the same part of day.
-  Default `story_arc: scene_energy` uses contiguous
-  same-setting scenes in time order, ranking best→better kids energy inside each scene
-  (morning car ≠ night car). Alternatives via episode `project.yaml`: `kids_energy` or
-  `chronological` (true calendar order, including night-then-next-day-morning).
+  `planning_scope: all_days` in that episode's `project.yaml`.
+  Default `story_arc: chronological` keeps clips in true capture-time order, no
+  energy-based reordering. Alternatives via episode `project.yaml`:
+  `scene_energy` (contiguous same-setting scenes in time order, ranking
+  best→better kids energy inside each scene) or `kids_energy` (global peak-first).
 - Framework defaults live in code/`DEFAULT_CONFIG`. Episode-specific taste from review
   feedback (duration, language, captions, arc, SFX density, forced includes/excludes)
   belongs in that episode's `project.yaml` or `work/edit_plan.json` — do not hardcode
@@ -62,9 +59,11 @@ Use the `ve` CLI. Do not recreate its media logic in ad-hoc scripts.
   to the ducking compressor — it re-raises the whole bed above speech and cancels the
   duck. If the user says BGM is too loud, lower `bgm.volume`; do not re-tune makeup.
 - Keep cached analysis unless the footage, model, or settings changed.
-- Captions default on as a separate soft file `output/captions.srt` (not burned into
-  `final.mp4`). Set `captions.burn_in: true` in an episode `project.yaml` to embed.
-  Pin `language: id` for Indo ASR when needed.
+- Captions default on as a separate soft file `output/captions.srt` (not burned
+  into `final.mp4`) — faster-whisper large-v3-turbo isn't reliably accurate
+  enough to bake in by default. Set `captions.burn_in: true` in an episode
+  `project.yaml` once transcript quality is confirmed for that footage. Pin
+  `language: id` for Indo ASR when needed.
 - YouTube listings come from `ve youtube-meta` (`work/youtube_listing.json`). This
   stack is YouTube Kids: keep `made_for_kids: true` and `kids_destination: true`.
   Child-facing copy only — no URLs, no children's surnames/school names, no subscribe

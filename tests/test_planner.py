@@ -3,10 +3,12 @@
 import pytest
 
 from vlog_editor.planner import (
+    _pick_open_source,
     build_balanced_fallback_plan,
     cluster_contiguous_scenes,
     constrain_selection_lengths,
     is_playful_source,
+    order_scene_clusters,
     resolve_target_duration,
     select_excerpt,
     select_required_settings,
@@ -247,6 +249,88 @@ def test_balanced_fallback_all_days_includes_secondary_capture_day() -> None:
     )
 
 
+def test_all_days_keeps_later_arrival_in_chronological_scene() -> None:
+    analysis = {
+        "clips": [
+            _clip(
+                "day-one-home.mov",
+                80,
+                transcript="hai pagi ini anak siap pergi",
+                setting="home",
+                capture_time="2026-08-01T08:00:00.000000Z",
+            ),
+            _clip(
+                "day-one-play.mov",
+                80,
+                transcript="anak main dan ketawa",
+                setting="outdoor",
+                capture_time="2026-08-01T09:00:00.000000Z",
+            ),
+            _clip(
+                "later-arrival.mov",
+                80,
+                transcript="udah sampai tempat berikutnya",
+                setting="vehicle",
+                capture_time="2026-08-08T10:00:00.000000Z",
+            ),
+        ]
+    }
+    plan = build_balanced_fallback_plan(
+        analysis,
+        120,
+        title="Week",
+        story_arc="scene_energy",
+        planning_scope="all_days",
+    )
+    fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=120)
+    assert not [error for error in errors if "capture time" in error]
+    assert all(section["section"] != "Arrival" for section in fixed["structure"])
+    selected = [
+        clip["file"]
+        for section in fixed["structure"]
+        for clip in section["clips"]
+    ]
+    # Calendar order may move inside the same part of day; only daypart regressions
+    # are forbidden for composite-day edits.
+    assert set(selected) == {
+        "day-one-home.mov",
+        "day-one-play.mov",
+        "later-arrival.mov",
+    }
+
+
+def test_narrow_setting_pool_still_reaches_target() -> None:
+    """Two-setting episodes must not starve under the 34% per-setting budget."""
+    analysis = {
+        "clips": [
+            _clip(
+                "drive.mov",
+                180,
+                transcript="hai guys anak main mobil di jalan ketawa seru",
+                setting="vehicle",
+                capture_time="2026-08-14T10:00:00.000000Z",
+            ),
+            _clip(
+                "play.mov",
+                450,
+                transcript="anak bermain game bareng ketawa seru banget",
+                setting="home",
+                capture_time="2026-08-15T02:00:00.000000Z",
+            ),
+        ]
+    }
+    plan = build_balanced_fallback_plan(
+        analysis,
+        120,
+        title="Weekend",
+        story_arc="scene_energy",
+        planning_scope="all_days",
+    )
+    fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=120)
+    assert errors == []
+    assert fixed["duration_sec"] >= 120 * 0.65
+
+
 def test_kids_energy_arc_orders_peak_before_quiet() -> None:
     play = _clip(
         "playground.mov",
@@ -303,15 +387,16 @@ def test_kids_energy_arc_orders_peak_before_quiet() -> None:
     assert fixed["story_arc"] == "kids_energy"
     names = [section["section"] for section in fixed["structure"]]
     assert any(name.startswith("Kids peak") for name in names)
-    assert any(name.startswith("Quiet / adult") for name in names)
     assert names[-1] == "CTA close"
-    # Peak kids files should appear before quiet/adult files in the edit.
+    # No setting/activity curation left — selection is pure energy: with more
+    # footage than fits the pacing budget, the low-energy adult clips (idle
+    # driving, eating while on the phone) lose out to the kids-peak content
+    # entirely rather than being kept in a reserved "quiet" pad.
     files = [clip["file"] for section in fixed["structure"] for clip in section["clips"]]
-    play_i = min(i for i, name in enumerate(files) if name in {"playground.mov", "animals.mov"})
-    quiet_files = [name for name in files if name in {"car-wait.mov", "adult-meal.mov"}]
-    assert quiet_files, files
-    quiet_i = min(i for i, name in enumerate(files) if name in {"car-wait.mov", "adult-meal.mov"})
-    assert play_i < quiet_i
+    assert "playground.mov" in files
+    assert "animals.mov" in files
+    assert "car-wait.mov" not in files
+    assert "adult-meal.mov" not in files
     assert files[-1] == "bye.mov"
 
 
@@ -457,6 +542,58 @@ def test_cluster_contiguous_scenes_splits_on_time_of_day() -> None:
     assert len(clusters) == 2
     assert [item["file"] for item in clusters[0]] == ["a.mov", "b.mov"]
     assert [item["file"] for item in clusters[1]] == ["c.mov"]
+
+
+def test_all_days_orders_scenes_by_daypart_not_calendar() -> None:
+    clusters = [
+        [
+            {
+                "file": "DJI_20260810195327_0005_D.MP4",
+                "_capture_time": "2026-08-10T12:53:28.000000Z",
+                "_section_setting": "home",
+                "start": 0,
+                "end": 10,
+            }
+        ],
+        [
+            {
+                "file": "DJI_20260812121814_0008_D.MP4",
+                "_capture_time": "2026-08-12T05:18:14.000000Z",
+                "_section_setting": "outdoor",
+                "start": 0,
+                "end": 10,
+            }
+        ],
+    ]
+    ordered = order_scene_clusters(clusters, planning_scope="all_days")
+    assert [cluster[0]["file"] for cluster in ordered] == [
+        "DJI_20260812121814_0008_D.MP4",
+        "DJI_20260810195327_0005_D.MP4",
+    ]
+
+
+def test_all_days_open_stays_in_earliest_available_daypart() -> None:
+    morning = _clip(
+        "DJI_20260815094942_0037_D.MP4",
+        80,
+        transcript="anak bermain game ketawa seru",
+        setting="home",
+        capture_time="2026-08-15T02:49:42.000000Z",
+    )
+    evening = _clip(
+        "DJI_20260814172155_0036_D.MP4",
+        80,
+        transcript="hai guys assalamualaikum kita mau pergi",
+        setting="vehicle",
+        capture_time="2026-08-14T10:21:55.000000Z",
+    )
+    selected = _pick_open_source(
+        [evening, morning],
+        planning_scope="all_days",
+    )
+    assert selected is morning
+
+
 def test_setting_order_cannot_override_capture_chronology() -> None:
     analysis = {
         "clips": [
@@ -757,7 +894,7 @@ def test_playful_source_boosts_kids_fooling_around() -> None:
     assert _clip_score(clip) >= 0.62
 
 
-def test_long_play_clip_can_contribute_multiple_beats() -> None:
+def test_long_play_clip_contributes_one_continuous_excerpt() -> None:
     segments = [
         {"start": 10, "end": 40, "text": "mainan kapal lucu yuk kita main"},
         {"start": 120, "end": 160, "text": "ketawa seru bermain lagi di lantai"},
@@ -811,8 +948,10 @@ def test_long_play_clip_can_contribute_multiple_beats() -> None:
         for clip in section["clips"]
         if clip["file"] == "long-play.mov"
     ]
-    assert len(play_clips) >= 2
-    assert all(clip["end"] - clip["start"] >= 10 for clip in play_clips)
+    # Simplified selection: one continuous excerpt per clip, not several
+    # separate highlight beats stitched from the same source.
+    assert len(play_clips) == 1
+    assert play_clips[0]["end"] - play_clips[0]["start"] >= 10
 
 
 def test_toy_store_cars_are_not_vehicle_setting() -> None:

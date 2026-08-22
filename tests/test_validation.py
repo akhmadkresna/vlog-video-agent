@@ -96,7 +96,9 @@ def test_validator_expands_to_complete_speech_segment() -> None:
     assert errors == []
 
 
-def test_validator_requires_available_scene_diversity() -> None:
+def test_validator_has_no_scene_diversity_requirement() -> None:
+    # No minimum-settings-covered floor: a plan using only 2 of 4 available
+    # settings is valid on its own terms (removed per explicit request).
     settings = ("vehicle", "home", "store", "outdoor")
     analysis = {
         "clips": [
@@ -120,8 +122,45 @@ def test_validator_requires_available_scene_diversity() -> None:
         ]
     }
     _, errors = validate_and_fix_plan(plan, analysis, target_duration=10)
-    assert any("at least 4 are required" in error for error in errors)
-    assert any("maximum is 40%" in error for error in errors)
+    assert not any("are required" in error for error in errors)
+    # No per-setting dominance cap: one setting may fill most of the plan.
+    assert not any("maximum is" in error for error in errors)
+
+
+def test_reserved_arrival_beat_is_excluded_from_setting_share() -> None:
+    settings = ("vehicle", "home", "store", "outdoor")
+    analysis = {
+        "clips": [
+            {
+                "metadata": {"filename": f"{setting}.mp4", "duration": 40},
+                "audio": {"words": []},
+                "visual": {"setting": setting},
+            }
+            for setting in settings
+        ]
+    }
+    plan = {
+        "structure": [
+            {
+                "section": "Arrival",
+                "clips": [{"file": "vehicle.mp4", "start": 0, "end": 20}],
+            },
+            {
+                "section": "Home — Best moments",
+                "clips": [{"file": "home.mp4", "start": 0, "end": 12}],
+            },
+            {
+                "section": "Store — Kids treats",
+                "clips": [{"file": "store.mp4", "start": 0, "end": 12}],
+            },
+            {
+                "section": "Outdoor — Best moments",
+                "clips": [{"file": "outdoor.mp4", "start": 0, "end": 12}],
+            },
+        ]
+    }
+    _, errors = validate_and_fix_plan(plan, analysis, target_duration=56)
+    assert not [error for error in errors if "maximum is 40%" in error]
 
 
 def test_validator_accepts_balanced_settings() -> None:

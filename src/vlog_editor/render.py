@@ -17,9 +17,9 @@ from vlog_editor.audio_pack import (
 from vlog_editor.captions import ffmpeg_subtitles_path, prepare_caption_files
 from vlog_editor.dashboard import require_approval
 from vlog_editor.media import probe_video, run
-from vlog_editor.project import Episode, read_json, write_json
+from vlog_editor.project import DEFAULT_BGM_VOLUME, Episode, read_json, write_json
 from vlog_editor.transitions import (
-    bundled_font_path,
+    bundled_card_image_path,
     plan_time_skip_cards,
     shift_time,
     transitions_config,
@@ -84,17 +84,6 @@ def _resolve_audio_path(episode: Episode, relative: str) -> Path:
     return episode.root / relative
 
 
-def _escape_drawtext_value(text: str) -> str:
-    """Escape a drawtext filter option value (wrapped in single quotes)."""
-    return (
-        str(text)
-        .replace("\\", "\\\\")
-        .replace("'", r"\'")
-        .replace(":", r"\:")
-        .replace("%", r"\%")
-    )
-
-
 def build_render_command(
     episode: Episode,
     plan: dict[str, Any],
@@ -124,7 +113,35 @@ def build_render_command(
         duration = float(clip["end"]) - start
         source = episode.footage / str(clip["file"])
         command += ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)]
-        metadata.append({"duration": duration, "has_audio": probe_video(source)["has_audio"]})
+        metadata.append(
+            {
+                "duration": duration,
+                "has_audio": probe_video(source)["has_audio"],
+                "gameplay": clip.get("gameplay")
+                if isinstance(clip.get("gameplay"), dict)
+                else None,
+            }
+        )
+
+    gameplay_input_count = 0
+    for item in metadata:
+        gameplay = item.get("gameplay")
+        if not isinstance(gameplay, dict):
+            continue
+        game_path = episode.gameplay / str(gameplay["file"])
+        if not game_path.is_file():
+            raise FileNotFoundError(f"Gameplay file missing: {game_path}")
+        game_duration = float(gameplay["duration_sec"])
+        command += [
+            "-ss",
+            f"{float(gameplay['game_start_sec']):.3f}",
+            "-t",
+            f"{game_duration:.3f}",
+            "-i",
+            str(game_path),
+        ]
+        item["gameplay_input_index"] = len(selections) + gameplay_input_count
+        gameplay_input_count += 1
 
     content_total = sum(item["duration"] for item in metadata)
     card_total = sum(float(card["duration"]) for card in cards)
@@ -144,7 +161,7 @@ def build_render_command(
     bgm_payload = plan.get("bgm") if isinstance(plan.get("bgm"), dict) else None
     bgm_config = episode.config.get("bgm", {})
     bgm_path = None
-    bgm_volume = float(bgm_config.get("volume", 0.85))
+    bgm_volume = float(bgm_config.get("volume", DEFAULT_BGM_VOLUME))
     bgm_segments: list[dict[str, Any]] = []
     if bgm_payload and (bgm_payload.get("file") or bgm_payload.get("segments")):
         if bgm_payload.get("file"):
@@ -178,18 +195,60 @@ def build_render_command(
     for path in bgm_input_paths:
         command += ["-stream_loop", "-1", "-i", str(path)]
 
-    font_path = ffmpeg_subtitles_path(bundled_font_path())
+    card_image_path = bundled_card_image_path()
+    if cards and not card_image_path.is_file():
+        raise FileNotFoundError(f"Time-skip card image missing: {card_image_path}")
+    next_free_input = len(selections) + gameplay_input_count + len(cue_paths) + len(bgm_input_paths)
 
     filters: list[str] = []
     concat_inputs: list[str] = []
     card_counter = 0
+    pip_config = episode.config.get("gameplay", {}).get("pip", {})
+    pip_ratio = max(0.15, min(0.5, float(pip_config.get("width_ratio", 0.28))))
+    pip_width = max(2, round(width * pip_ratio / 2) * 2)
+    pip_height = max(2, round((pip_width * height / width) / 2) * 2)
+    pip_margin = max(0, int(pip_config.get("margin", 40)))
+    pip_border = max(0, int(pip_config.get("border", 6)))
+    pip_position = str(pip_config.get("position", "bottom_right")).lower()
+    pip_outer_width = pip_width + 2 * pip_border
+    pip_outer_height = pip_height + 2 * pip_border
+    pip_x = pip_margin if "left" in pip_position else width - pip_outer_width - pip_margin
+    pip_y = pip_margin if "top" in pip_position else height - pip_outer_height - pip_margin
     for index, item in enumerate(metadata):
         duration = item["duration"]
-        filters.append(
-            f"[{index}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        video_normalize = (
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,"
-            f"fps={fps},setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v{index}]"
+            f"fps={fps},setsar=1,format=yuv420p,setpts=PTS-STARTPTS"
         )
+        gameplay = item.get("gameplay")
+        if isinstance(gameplay, dict):
+            game_index = int(item["gameplay_input_index"])
+            offset = float(gameplay["camera_offset_sec"])
+            game_duration = float(gameplay["duration_sec"])
+            game_end = offset + game_duration
+            filters.append(
+                f"[{index}:v]{video_normalize},split=2[cam_base{index}][cam_pip{index}]"
+            )
+            filters.append(
+                f"[{game_index}:v]{video_normalize},"
+                f"setpts=PTS+{offset:.3f}/TB[game{index}]"
+            )
+            filters.append(
+                f"[cam_base{index}][game{index}]overlay=0:0:eof_action=pass:"
+                f"enable='between(t,{offset:.3f},{game_end:.3f})'[game_base{index}]"
+            )
+            filters.append(
+                f"[cam_pip{index}]scale={pip_width}:{pip_height},"
+                f"pad={pip_outer_width}:{pip_outer_height}:{pip_border}:{pip_border}:white"
+                f"[pip{index}]"
+            )
+            filters.append(
+                f"[game_base{index}][pip{index}]overlay={pip_x}:{pip_y}:eof_action=pass:"
+                f"enable='between(t,{offset:.3f},{game_end:.3f})'[v{index}]"
+            )
+        else:
+            filters.append(f"[{index}:v]{video_normalize}[v{index}]")
         fade_out = max(0.0, duration - 0.03)
         if item["has_audio"]:
             filters.append(
@@ -210,17 +269,14 @@ def build_render_command(
             label = f"card{card_counter}"
             card_counter += 1
             card_duration = float(card["duration"])
-            escaped_text = _escape_drawtext_value(str(card["label"]))
-            font_size = max(24, round(height * 0.08))
+            image_index = next_free_input
+            next_free_input += 1
+            command += ["-loop", "1", "-framerate", str(fps), "-i", str(card_image_path)]
             filters.append(
-                f"color=c={transitions['bg_color']}:s={width}x{height}:"
-                f"d={card_duration:.3f}:r={fps},format=yuv420p,setsar=1[v{label}raw]"
-            )
-            filters.append(
-                f"[v{label}raw]drawtext=fontfile='{font_path}':text='{escaped_text}':"
-                f"fontsize={font_size}:fontcolor={transitions['text_color']}:"
-                "borderw=3:bordercolor=black@0.85:x=(w-text_w)/2:y=(h-text_h)/2"
-                f"[v{label}]"
+                f"[{image_index}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,"
+                f"fps={fps},setsar=1,format=yuv420p,"
+                f"trim=duration={card_duration:.3f},setpts=PTS-STARTPTS[v{label}]"
             )
             filters.append(
                 f"anullsrc=r=48000:cl=stereo,atrim=duration={card_duration:.3f},"
@@ -242,7 +298,7 @@ def build_render_command(
         video_map = "[vcap]"
 
     dialogue_label = "[acat]"
-    next_input = len(selections)
+    next_input = len(selections) + gameplay_input_count
     if cue_paths:
         sfx_labels: list[str] = []
         for offset, cue in enumerate(cues):
@@ -331,10 +387,11 @@ def build_render_command(
             [
                 f"{dialogue_label}asplit=2[original][sidechain]",
                 (
-                    # Soft duck under speech — keep a dry music floor (mix<1) so beds
-                    # stay hearable under constant family dialogue.
-                    "[music][sidechain]sidechaincompress=threshold=0.1:ratio=2:"
-                    "attack=40:release=600:makeup=2.0:mix=0.55[ducked]"
+                    # Duck fully under speech. makeup must stay 1: any makeup gain is
+                    # applied to the whole bed, which re-raises music above dialogue and
+                    # cancels the ducking it is supposed to help.
+                    "[music][sidechain]sidechaincompress=threshold=0.03:ratio=8:"
+                    "attack=15:release=450:makeup=1:mix=1[ducked]"
                 ),
                 "[original][ducked]amix=inputs=2:duration=first:normalize=0[aout]",
             ]
@@ -367,7 +424,9 @@ def build_render_command(
     return command, ";\n".join(filters), total
 
 
-def verify_output(path: Path, expected_duration: float, fps: int) -> dict[str, Any]:
+def verify_output(
+    path: Path, expected_duration: float, fps: int, *, segment_count: int = 1
+) -> dict[str, Any]:
     probe = run(
         [
             "ffprobe",
@@ -401,7 +460,12 @@ def verify_output(path: Path, expected_duration: float, fps: int) -> dict[str, A
         )
     if drift > 0.08:
         errors.append(f"A/V duration drift {drift:.3f}s exceeds 0.08s")
-    if frames and abs(frames - expected_frames) > max(3, round(fps * 0.1)):
+    # Each concatenated segment (clip or time-skip card) can shed roughly a
+    # fraction of a frame at its fps-conversion boundary — so the tolerance
+    # scales with segment count rather than staying fixed regardless of how
+    # many pieces went into the render.
+    frame_tolerance = max(3, round(fps * 0.1), segment_count)
+    if frames and abs(frames - expected_frames) > frame_tolerance:
         errors.append(f"frame count {frames} differs from expected {expected_frames}")
     decode = run(["ffmpeg", "-v", "error", "-i", str(path), "-f", "null", "NUL"], check=False)
     if decode.returncode:
@@ -476,10 +540,12 @@ def render_episode(episode: Episode) -> Path:
     filter_path.write_text(filter_script, encoding="utf-8")
     print(f"Rendering {output_duration:.1f}s with {command[command.index('-c:v') + 1]}...")
     run(command)
+    selection_count = sum(len(section.get("clips", []) or []) for section in plan.get("structure", []) or [])
     report = verify_output(
         output,
         output_duration,
         int(episode.config["output"]["fps"]),
+        segment_count=selection_count + len(time_skip_cards),
     )
     report["captions"] = {
         "enabled": bool(caption_meta.get("enabled")),

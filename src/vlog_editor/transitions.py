@@ -7,14 +7,15 @@ DEFAULT_TRANSITIONS: dict[str, Any] = {
     "enabled": True,
     "interval_sec": 300.0,
     "card_duration": 2.0,
-    "bg_color": "0x1F6FEB",
-    "text_color": "white",
     # Punchy comedic "pop" as each card appears — matches the bundled meme
     # boom (vine-boom-sound.mp3) by default. Set to "" to disable, or any
     # other cue type/role from the audio pack (whoosh, click, woohoo, ...).
     "sfx_type": "boom",
     "sfx_gain": None,
 }
+
+# A single fixed "few minutes later" card image, no generated/computed text.
+CARD_LABEL = "Few minutes later..."
 
 
 def transitions_config(episode_config: dict[str, Any]) -> dict[str, Any]:
@@ -25,14 +26,8 @@ def transitions_config(episode_config: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-def bundled_font_path() -> Path:
-    return Path(__file__).resolve().parent / "assets" / "fonts" / "Bangers-Regular.ttf"
-
-
-def format_time_skip_label(elapsed_sec: float) -> str:
-    minutes = max(1, round(elapsed_sec / 60.0))
-    unit = "minute" if minutes == 1 else "minutes"
-    return f"{minutes} {unit} later..."
+def bundled_card_image_path() -> Path:
+    return Path(__file__).resolve().parent / "assets" / "images" / "few-minutes-later.webp"
 
 
 def plan_time_skip_cards(
@@ -41,7 +36,7 @@ def plan_time_skip_cards(
     interval_sec: float,
     card_duration: float,
 ) -> list[dict[str, Any]]:
-    """Original-design "X minutes later" cards, snapped to clip boundaries.
+    """Fixed-image "few minutes later" cards, snapped to clip boundaries.
 
     Returns entries keyed by after_index (0-based position in the flattened
     plan.structure[].clips[] list) so the render pipeline can splice a card
@@ -72,7 +67,7 @@ def plan_time_skip_cards(
                     "after_index": index,
                     "content_time": cumulative,
                     "duration": card_duration,
-                    "label": format_time_skip_label(next_mark),
+                    "label": CARD_LABEL,
                 }
             )
             next_mark += interval_sec

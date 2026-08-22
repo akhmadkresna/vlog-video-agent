@@ -9,6 +9,13 @@ def test_parse_json_response_accepts_fenced_json() -> None:
     assert parse_json_response('```json\n{"summary":"street"}\n```') == {"summary": "street"}
 
 
+def test_parse_json_response_strips_trailing_commas() -> None:
+    assert parse_json_response('{"summary":"ok","subjects":["kid",],}') == {
+        "summary": "ok",
+        "subjects": ["kid"],
+    }
+
+
 def test_multi_image_request_uses_one_chat_call(tmp_path: Path) -> None:
     frames = [tmp_path / f"{index}.jpg" for index in range(3)]
     for index, frame in enumerate(frames):

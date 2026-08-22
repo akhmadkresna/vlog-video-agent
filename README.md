@@ -99,19 +99,18 @@ with classic fallbacks, and never auto-downloads audio at runtime. See
 
 ## Time-skip transition cards
 
-Render inserts an original-design "X minutes later..." title card every
-`transitions.interval_sec` (default 300s / 5 min), snapped to the nearest clip
-boundary at/after each mark (never mid-clip, and skipped near the very end of
-the edit). It's a generated card (bundled OFL font, no external video), not a
-downloaded meme clip. Configure or disable per episode in `project.yaml`:
+Render inserts a fixed "few minutes later..." title card image
+(`src/vlog_editor/assets/images/few-minutes-later.webp`, paired with a boom
+SFX) every `transitions.interval_sec` (default 300s / 5 min), snapped to the
+nearest clip boundary at/after each mark (never mid-clip, and skipped near the
+very end of the edit). Configure or disable per episode in `project.yaml`:
 
 ```yaml
 transitions:
   enabled: true
   interval_sec: 300
   card_duration: 2.0
-  bg_color: "0x1F6FEB"
-  text_color: white
+  sfx_type: boom
 ```
 
 ## Commands

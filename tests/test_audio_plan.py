@@ -11,7 +11,12 @@ from vlog_editor.audio_pack import (
     ensure_audio_pack_layout,
     load_audio_pack,
 )
-from vlog_editor.audio_plan import plan_audio_cues
+from vlog_editor.audio_plan import (
+    MAX_BED_VOLUME,
+    _bed_volume,
+    _plan_bgm_segments,
+    plan_audio_cues,
+)
 from vlog_editor.project import DEFAULT_CONFIG, Episode, create_episode
 from vlog_editor.render import build_render_command
 from vlog_editor.validation import validate_audio_plan
@@ -464,3 +469,32 @@ def test_render_graph_includes_sfx_adelay_and_mix(
     _, filters, _ = build_render_command(episode, plan, episode.output / "final.mp4")
     assert "adelay=500|500" in filters
     assert "[acat][sfxmix]amix=inputs=2" in filters
+
+
+def test_bed_volumes_scale_with_configured_bgm_volume() -> None:
+    """Beds are relative trims of bgm.volume, so lowering it lowers every bed."""
+    timeline = [
+        {
+            "edit_start": 0.0,
+            "edit_end": 30.0,
+            "duration": 30.0,
+            "note": "kids playing and fooling around",
+            "subtitle": "haha lucu",
+            "story_value": 0.9,
+            "words": 4,
+        }
+    ]
+    quiet = _plan_bgm_segments(timeline, 30.0, base_volume=0.2)
+    loud = _plan_bgm_segments(timeline, 30.0, base_volume=0.4)
+    assert quiet and loud
+    assert max(float(seg["volume"]) for seg in quiet) < max(
+        float(seg["volume"]) for seg in loud
+    )
+    # Never louder than the ceiling, even from an over-driven configured level.
+    hot = _plan_bgm_segments(timeline, 30.0, base_volume=1.0)
+    assert max(float(seg["volume"]) for seg in hot) <= MAX_BED_VOLUME
+
+
+def test_bed_volume_helper_caps_and_scales() -> None:
+    assert _bed_volume(0.2, 1.15) == pytest.approx(0.23)
+    assert _bed_volume(0.9, 1.25) == MAX_BED_VOLUME

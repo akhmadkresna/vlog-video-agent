@@ -32,7 +32,12 @@ def parse_json_response(text: str) -> dict[str, Any]:
         start, end = stripped.find("{"), stripped.rfind("}")
         if start >= 0 and end > start:
             stripped = stripped[start : end + 1]
-    value = json.loads(stripped)
+    # Models sometimes emit trailing commas before } or ].
+    cleaned = re.sub(r",\s*([}\]])", r"\1", stripped)
+    try:
+        value = json.loads(cleaned)
+    except json.JSONDecodeError:
+        value = json.loads(stripped)
     if not isinstance(value, dict):
         raise TypeError("Model response must be a JSON object")
     return value
@@ -47,7 +52,7 @@ class OllamaClient:
     ) -> None:
         self.endpoint = str(config["endpoint"]).rstrip("/")
         self.model = str(config["model"])
-        self.max_tokens = int(config.get("max_output_tokens", 240))
+        self.max_tokens = int(config.get("max_output_tokens", 512))
         self.keep_alive = str(config.get("keep_alive", "30m"))
         self.transport = transport
 
@@ -139,8 +144,23 @@ order. Pure visual ranges should be 2-8 seconds; spoken ranges may be 5-30 secon
 must preserve a complete exchange. For clips longer than 60 seconds, sample moments
 across the clip and never recommend the entire clip or default every range to 0.
 """.strip()
-        content, metrics = self.chat(prompt, images=frames)
-        return parse_json_response(content), metrics
+        content, metrics = self.chat(prompt, images=frames, max_tokens=self.max_tokens)
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                return parse_json_response(content), metrics
+            except (json.JSONDecodeError, TypeError) as exc:
+                last_error = exc
+                if attempt >= 2:
+                    break
+                # Truncated or malformed JSON: retry with a fresher generation.
+                content, metrics = self.chat(
+                    prompt,
+                    images=frames,
+                    max_tokens=max(self.max_tokens, 768),
+                    retries=1,
+                )
+        raise ValueError(f"Vision JSON parse failed after retries: {last_error}")
 
     def unload(self) -> None:
         payload = {"model": self.model, "keep_alive": 0}

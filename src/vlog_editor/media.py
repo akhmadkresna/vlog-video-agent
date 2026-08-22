@@ -8,6 +8,47 @@ from pathlib import Path
 from typing import Any
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm"}
+DJI_STAMP_RE = re.compile(r"DJI_(\d{8})(\d{6})")
+# Composite-day bands for merged multi-day edits (local clock).
+DAYPART_MORNING = 0
+DAYPART_MIDDAY = 1
+DAYPART_EVENING = 2
+DAYPART_NIGHT = 3
+
+
+def local_clock(capture_time: str | None, filename: str = "") -> tuple[int, int] | None:
+    """Local hour/minute. DJI filenames are local; ISO capture_time is often UTC."""
+    match = DJI_STAMP_RE.search(str(filename or ""))
+    if match:
+        stamp = match.group(2)
+        return int(stamp[0:2]), int(stamp[2:4])
+    text = str(capture_time or "").strip()
+    if not text:
+        return None
+    try:
+        from datetime import datetime
+
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.hour, parsed.minute
+
+
+def daypart_rank(hour: int) -> int:
+    if 5 <= hour < 11:
+        return DAYPART_MORNING
+    if 11 <= hour < 17:
+        return DAYPART_MIDDAY
+    if 17 <= hour < 21:
+        return DAYPART_EVENING
+    return DAYPART_NIGHT
+
+
+def item_daypart(capture_time: str | None, filename: str = "") -> int:
+    clock = local_clock(capture_time, filename)
+    if clock is None:
+        return DAYPART_MIDDAY
+    return daypart_rank(clock[0])
 
 
 def run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:

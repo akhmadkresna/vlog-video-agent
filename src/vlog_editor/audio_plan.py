@@ -13,7 +13,7 @@ from vlog_editor.audio_pack import (
     meme_files_for_role,
     resolve_pack_file,
 )
-from vlog_editor.project import Episode
+from vlog_editor.project import DEFAULT_BGM_VOLUME, Episode
 from vlog_editor.validation import infer_setting
 
 DENSITY_MIN_GAP = {
@@ -168,6 +168,14 @@ MAX_PLAY_BED_SEC = 40.0
 MAX_FUN_BED_SEC = 20.0
 MERGE_GAP_SEC = 2.0
 LOW_SPEECH_WORDS_PER_SEC = 0.85
+# Lift busier beds slightly *relative to* the configured bed level instead of adding a
+# fixed amount, so raising or lowering bgm.volume scales the whole music layer.
+PLAY_BED_BOOST = 1.15
+FUN_BED_BOOST = 1.1
+INTRO_BED_BOOST = 1.25
+OUTRO_BED_BOOST = 1.2
+# Hard ceiling: above this, music competes with speech no matter how well it ducks.
+MAX_BED_VOLUME = 0.55
 
 
 def _timeline_clips(plan: dict[str, Any]) -> list[dict[str, Any]]:
@@ -399,6 +407,10 @@ def _trim_bgm_coverage(
     return _merge_bgm_segments(kept)
 
 
+def _bed_volume(base_volume: float, boost: float) -> float:
+    return round(min(MAX_BED_VOLUME, base_volume * boost), 3)
+
+
 def _plan_bgm_segments(
     timeline: list[dict[str, Any]],
     total: float,
@@ -422,7 +434,7 @@ def _plan_bgm_segments(
                 {
                     "start_sec": bed_start,
                     "end_sec": bed_end,
-                    "volume": min(1.05, base_volume + 0.08),
+                    "volume": _bed_volume(base_volume, PLAY_BED_BOOST),
                     "reason": "playing / fooling around",
                 }
             )
@@ -435,7 +447,7 @@ def _plan_bgm_segments(
                 {
                     "start_sec": bed_start,
                     "end_sec": bed_end,
-                    "volume": min(1.0, base_volume + 0.06),
+                    "volume": _bed_volume(base_volume, FUN_BED_BOOST),
                     "reason": "fun moment",
                 }
             )
@@ -469,7 +481,7 @@ def _plan_bgm_segments(
             {
                 "start_sec": 0.0,
                 "end_sec": min(INTRO_SEC, total),
-                "volume": min(1.1, base_volume + 0.12),
+                "volume": _bed_volume(base_volume, INTRO_BED_BOOST),
                 "reason": "intro",
             }
         )
@@ -479,7 +491,7 @@ def _plan_bgm_segments(
             {
                 "start_sec": max(0.0, total - OUTRO_SEC),
                 "end_sec": total,
-                "volume": min(1.05, base_volume + 0.1),
+                "volume": _bed_volume(base_volume, OUTRO_BED_BOOST),
                 "reason": "outro",
             }
         )
@@ -501,7 +513,7 @@ def _bgm_pool(
 ) -> list[dict[str, Any]]:
     """Resolve usable BGM candidates. Pinned bgm.file uses only that track."""
     configured = bgm_config.get("file")
-    volume = float(bgm_config.get("volume", 0.85))
+    volume = float(bgm_config.get("volume", DEFAULT_BGM_VOLUME))
     if configured:
         relative = str(configured)
         candidate = Path(relative)
@@ -539,7 +551,9 @@ def _bgm_pool(
         pool.append(
             {
                 "file": relative,
-                "volume": float(entry.get("gain", volume)),
+                # Pack gain is a per-track trim (1.0 = untouched), not a bed level, so
+                # the episode's bgm.volume stays the thing that sets how loud music sits.
+                "volume": round(volume * float(entry.get("gain", 1.0)), 3),
                 "license": entry["license"],
                 "attribution": entry.get("attribution"),
             }
@@ -584,7 +598,9 @@ def _resolve_bgm_source(
     primary = pool[0]
     return {
         "file": primary["file"],
-        "volume": float(bgm_config.get("volume", primary.get("volume", 0.85))),
+        "volume": float(
+            bgm_config.get("volume", primary.get("volume", DEFAULT_BGM_VOLUME))
+        ),
         "license": primary["license"],
         "attribution": primary.get("attribution"),
         "candidates": pool,

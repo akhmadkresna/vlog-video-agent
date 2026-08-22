@@ -24,21 +24,17 @@ from vlog_editor.kids_interest import (
     source_has_strong_wow,
     source_wow_summary,
 )
-from vlog_editor.media import probe_video
+from vlog_editor.gameplay import attach_gameplay_matches
+from vlog_editor.media import item_daypart, probe_video
 from vlog_editor.project import Episode, read_json, write_json
 from vlog_editor.validation import infer_setting, validate_and_fix_plan, validate_audio_plan
 from vlog_editor.vision import OllamaClient, parse_json_response
 
 MIN_SELECTION_SEC = 10.0
 DEFAULT_MAX_SELECTION_SEC = 36.0
-PLAY_MAX_SELECTION_SEC = 55.0
-MAX_PLAY_BEATS_PER_CLIP = 3
+PLAY_MAX_SELECTION_SEC = 90.0
 OPEN_CTA_BEAT_SEC = 22.0
 MIN_OPEN_CTA_SEC = 12.0
-# Hold part of the middle budget for the last portion of the capture day so
-# evening settings (e.g. night mall) are not starved by long daytime play beats.
-LATE_DAY_FRACTION = 0.30
-LATE_DAY_RESERVE_RATIO = 0.22
 
 MIN_RECOMMENDED_DURATION_SEC = 7 * 60
 
@@ -149,17 +145,21 @@ def source_kids_audience_categories(source: dict[str, Any]) -> list[str]:
 
 
 def allows_extra_play_beats(source: dict[str, Any]) -> bool:
-    """Multi-beats for playful kids activity or strong unused wow payoffs."""
+    """Multi-beats for playful kids activity, strong unused wow payoffs, or any
+    other long clip that's clearly worth keeping (children on camera, high
+    score) — a good long take shouldn't be capped at one short beat just
+    because it wasn't tagged "playful"."""
     if is_adult_meal_focus(source):
         return False
     if float(source.get("metadata", {}).get("duration", 0) or 0) < 90:
         return False
     if source_has_strong_wow(source):
         return True
-    if not is_playful_source(source):
-        return False
-    # Need at least one on-camera kids-audience activity hook.
-    return source_kids_audience_interest(source) >= 0.34
+    if is_playful_source(source):
+        # Need at least one on-camera kids-audience activity hook.
+        if source_kids_audience_interest(source) >= 0.34:
+            return True
+    return source_has_children(source) and _clip_score(source) >= 0.6
 
 
 def is_cta_source(source: dict[str, Any]) -> bool:
@@ -302,6 +302,12 @@ def select_excerpt(
             if min(end, previous_end) - max(start, previous_start) > 0.35:
                 return True
         return False
+
+    # The whole clip was requested and fits: use all of it rather than
+    # narrowing to a single "best moment" sub-range — a caller asking for
+    # the full duration wants the full clip, not a highlight of it.
+    if max_duration >= source_duration - 1e-6 and not overlaps_avoided(0.0, source_duration):
+        return 0.0, source_duration
 
     segments = [
         segment
@@ -562,10 +568,6 @@ def is_peak_kids_source(source: dict[str, Any]) -> bool:
     return kids_energy_score(source) >= 0.34
 
 
-def is_low_activity_source(source: dict[str, Any]) -> bool:
-    return not is_peak_kids_source(source)
-
-
 def _capture_epoch(capture_time: str) -> float | None:
     text = str(capture_time or "").strip()
     if not text:
@@ -621,6 +623,40 @@ def cluster_contiguous_scenes(items: list[dict[str, Any]]) -> list[list[dict[str
             clusters.append([item])
             keys.append(key)
     return clusters
+
+
+def _item_filename(item: dict[str, Any]) -> str:
+    return str(item.get("file") or item.get("metadata", {}).get("filename", "") or "")
+
+
+def _item_capture_stamp(item: dict[str, Any]) -> str:
+    return str(
+        item.get("_capture_time")
+        or item.get("metadata", {}).get("capture_time")
+        or ""
+    )
+
+
+def _item_daypart(item: dict[str, Any]) -> int:
+    return item_daypart(_item_capture_stamp(item), _item_filename(item))
+
+
+def order_scene_clusters(
+    clusters: list[list[dict[str, Any]]],
+    *,
+    planning_scope: str = "primary_day",
+) -> list[list[dict[str, Any]]]:
+    """On merged days, tell one composite day: morning → midday → evening → night."""
+    if normalize_planning_scope(planning_scope) != "all_days":
+        return clusters
+
+    def cluster_key(cluster: list[dict[str, Any]]) -> tuple[int, str, str]:
+        daypart = min(_item_daypart(item) for item in cluster)
+        first_time = min(_item_capture_stamp(item) or "9999" for item in cluster)
+        first_file = min(_item_filename(item) for item in cluster)
+        return daypart, first_time, first_file
+
+    return sorted(clusters, key=cluster_key)
 
 
 def rank_clips_within_scene(clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -805,6 +841,7 @@ def _selection_from_source(
     min_duration: float | None = None,
     prefer_greeting: bool = False,
     prefer_arrival: bool = False,
+    hard_cap_override: float | None = None,
 ) -> dict[str, Any] | None:
     metadata = source.get("metadata", {})
     source_duration = max(0.0, float(metadata.get("duration", 0)))
@@ -812,7 +849,9 @@ def _selection_from_source(
     # Skip leftover budget crumbs that produce weird mid-sentence stubs.
     if max_duration < min_needed and source_duration >= min_needed:
         return None
-    hard_cap = _max_selection_for_source(source)
+    hard_cap = (
+        _max_selection_for_source(source) if hard_cap_override is None else hard_cap_override
+    )
     requested = min(hard_cap, source_duration, max(0.0, max_duration))
     if requested < 0.35:
         return None
@@ -860,7 +899,11 @@ def _selection_from_source(
     }
 
 
-def _pick_open_source(pool: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _pick_open_source(
+    pool: list[dict[str, Any]],
+    *,
+    planning_scope: str = "primary_day",
+) -> dict[str, Any] | None:
     """Prefer early departure greeting; keep arrival for its own beat when possible."""
     if not pool:
         return None
@@ -871,6 +914,17 @@ def _pick_open_source(pool: list[dict[str, Any]]) -> dict[str, Any] | None:
     ]
     if not usable:
         return None
+    if normalize_planning_scope(planning_scope) == "all_days":
+        usable = sorted(
+            usable,
+            key=lambda clip: (
+                _item_daypart(clip),
+                _capture_time(clip) or "9999",
+                str(clip.get("metadata", {}).get("filename", "")),
+            ),
+        )
+        earliest_daypart = min(_item_daypart(clip) for clip in usable)
+        usable = [clip for clip in usable if _item_daypart(clip) == earliest_daypart]
     # Search a wider early window for spoken greetings so car-hello beats are not missed.
     greet_count = max(1, int(len(usable) * 0.40 + 0.999))
     greet_window = usable[:greet_count]
@@ -933,6 +987,7 @@ def _cta_close_candidates(
     pool: list[dict[str, Any]],
     *,
     not_before_capture_time: str,
+    not_before_daypart: int | None = None,
 ) -> list[dict[str, Any]]:
     """Late usable close candidates, best-first (explicit CTA, then cute, then latest)."""
     if not pool:
@@ -942,14 +997,27 @@ def _cta_close_candidates(
         for clip in pool
         if float(clip.get("metadata", {}).get("duration", 0) or 0) >= MIN_OPEN_CTA_SEC
         and (
-            not not_before_capture_time
-            or (_capture_time(clip) or "9999") >= not_before_capture_time
+            (
+                not_before_daypart is not None
+                and _item_daypart(clip) >= not_before_daypart
+            )
+            or (
+                not_before_daypart is None
+                and (
+                    not not_before_capture_time
+                    or (_capture_time(clip) or "9999") >= not_before_capture_time
+                )
+            )
         )
     ]
     if not usable:
         return []
-    late_count = max(1, int(len(usable) * 0.30 + 0.999))
-    late = usable[-late_count:]
+    if not_before_daypart is not None:
+        latest_part = max(_item_daypart(clip) for clip in usable)
+        late = [clip for clip in usable if _item_daypart(clip) == latest_part]
+    else:
+        late_count = max(1, int(len(usable) * 0.30 + 0.999))
+        late = usable[-late_count:]
     explicit = [clip for clip in late if CTA_RE.search(_source_text(clip))]
     cute = [
         clip
@@ -995,42 +1063,14 @@ def build_balanced_fallback_plan(
         )
     )
 
-    settings_present = sorted(
-        {infer_setting(clip) for clip in pool if infer_setting(clip) != "other"}
-    )
-    if not settings_present:
-        settings_present = ["other"]
-
-    ranks = {
-        setting.strip().lower(): index
-        for index, setting in enumerate(setting_order or [])
-    }
-    # Prefer settings that appear earlier in capture order, then optional ranks.
-    first_seen: dict[str, int] = {}
-    for index, clip in enumerate(pool):
-        setting = infer_setting(clip)
-        first_seen.setdefault(setting, index)
-    settings_present.sort(
-        key=lambda setting: (
-            ranks.get(setting, len(ranks)),
-            first_seen.get(setting, 10_000),
-        )
-    )
-    required_settings = select_required_settings(
-        settings_present,
-        first_seen=first_seen,
-        pool=pool,
-        setting_order=setting_order,
-        max_settings=4,
-    )
-
     desired_total = target_duration * 0.95
-    # Validator caps a setting at 40% of *plan* duration — leave headroom vs undershoot.
-    setting_budget = desired_total * 0.34
+    # No per-setting diversity cap and no required-settings reservation: one
+    # setting may dominate the plan if that's genuinely where the
+    # strongest/most abundant footage is (removed per explicit request — was
+    # rationing good footage down for balance).
     selected: list[dict[str, Any]] = []
     selected_files: set[str] = set()
     selected_ranges: dict[str, list[tuple[float, float]]] = defaultdict(list)
-    setting_duration: dict[str, float] = defaultdict(float)
     total = 0.0
     # Leave room for validator speech/segment expansion so multi-beats do not overlap.
     AVOID_PAD_SEC = 6.5
@@ -1040,20 +1080,17 @@ def build_balanced_fallback_plan(
     def _commit(selection: dict[str, Any]) -> None:
         nonlocal total
         filename = str(selection["file"])
-        setting = str(selection.get("_setting", "other"))
         selected.append(selection)
         selected_files.add(filename)
         span = (float(selection["start"]), float(selection["end"]))
         selected_ranges[filename].append(
             (max(0.0, span[0] - AVOID_PAD_SEC), span[1] + AVOID_PAD_SEC)
         )
-        duration = span[1] - span[0]
-        setting_duration[setting] += duration
-        total += duration
+        total += span[1] - span[0]
 
     # Reserve greeting / start-of-day open first; CTA is chosen after the middle so it
     # cannot starve the body by locking an early upper capture bound.
-    open_source = _pick_open_source(pool)
+    open_source = _pick_open_source(pool, planning_scope=scope)
     if open_source is not None:
         candidate = _selection_from_source(
             open_source,
@@ -1074,10 +1111,17 @@ def build_balanced_fallback_plan(
     open_time = str(open_selection.get("_capture_time") or "") if open_selection else ""
     open_file = str(open_selection.get("file") or "") if open_selection else ""
     arrival_selection: dict[str, Any] | None = None
-    arrival_source = _pick_arrival_source(
-        pool,
-        not_before_capture_time=open_time,
-        exclude_files={open_file} if open_file else set(),
+    # A global "Arrival" section works for one capture day, but in an all-days
+    # episode it can pull a later day's arrival ahead of earlier-day scenes.
+    # Let arrivals participate in their natural chronological scene instead.
+    arrival_source = (
+        None
+        if scope == "all_days"
+        else _pick_arrival_source(
+            pool,
+            not_before_capture_time=open_time,
+            exclude_files={open_file} if open_file else set(),
+        )
     )
     if arrival_source is not None:
         candidate = _selection_from_source(
@@ -1096,12 +1140,6 @@ def build_balanced_fallback_plan(
     # Hold budget for the eventual CTA close.
     cta_reserve = OPEN_CTA_BEAT_SEC
     middle_cap = max(0.0, desired_total - cta_reserve)
-    late_index = max(0, int(len(pool) * (1.0 - LATE_DAY_FRACTION)))
-    late_cutoff_time = ""
-    if pool and late_index < len(pool):
-        late_cutoff_time = _capture_time(pool[late_index]) or ""
-    late_reserve = middle_cap * LATE_DAY_RESERVE_RATIO if late_cutoff_time else 0.0
-    early_middle_cap = max(0.0, middle_cap - late_reserve)
 
     def _in_middle_window(source: dict[str, Any]) -> bool:
         capture = _capture_time(source) or "9999"
@@ -1109,203 +1147,63 @@ def build_balanced_fallback_plan(
             return False
         return True
 
-    def _source_middle_cap(source: dict[str, Any]) -> float:
-        capture = _capture_time(source) or ""
-        if late_cutoff_time and capture >= late_cutoff_time:
-            return middle_cap
-        return early_middle_cap
-
-    def _try_add(
-        source: dict[str, Any],
-        *,
-        allow_extra_beats: bool,
-        respect_late_reserve: bool = True,
-    ) -> None:
-        nonlocal total
-        if not _in_middle_window(source):
-            return
+    # Middle content: no per-setting diversity cap, no required-settings
+    # reservation, no peak/low-activity split, no repeated highlight beats.
+    # If the remaining footage fits under the pacing cap, keep all of it —
+    # one selection per clip, at full length. If it doesn't fit, keep the
+    # highest-energy clips first and let the weakest miss the cut; a
+    # speechless transit pad is excluded outright since it carries no energy
+    # to judge either way.
+    remaining_pool = [
+        clip
+        for clip in pool
+        if str(clip.get("metadata", {}).get("filename", "")) not in selected_files
+        and _in_middle_window(clip)
+        and not is_speechless_transit_pad(clip)
+    ]
+    remaining_duration = sum(
+        max(0.0, float(clip.get("metadata", {}).get("duration", 0))) for clip in remaining_pool
+    )
+    fill_order = (
+        remaining_pool
+        if remaining_duration <= middle_cap
+        else sorted(remaining_pool, key=_clip_score, reverse=True)
+    )
+    for source in fill_order:
+        if total >= middle_cap:
+            break
         filename = str(source.get("metadata", {}).get("filename", ""))
-        setting = infer_setting(source)
-        if setting_duration[setting] >= setting_budget - 1e-6:
-            return
-        source_cap = (
-            _source_middle_cap(source) if respect_late_reserve else middle_cap
-        )
-        remaining_setting = setting_budget - setting_duration[setting]
-        remaining_total = source_cap - total
-        budget = min(remaining_setting, remaining_total)
-        if budget < MIN_SELECTION_SEC and float(source.get("metadata", {}).get("duration", 0)) >= MIN_SELECTION_SEC:
-            return
         source_duration = float(source.get("metadata", {}).get("duration", 0))
-        beats = 1
-        if (
-            allow_extra_beats
-            and allows_extra_play_beats(source)
-        ):
-            beats = min(
-                MAX_PLAY_BEATS_PER_CLIP,
-                max(1, int(min(budget, source_duration) // 40)),
-            )
-        for _ in range(beats):
-            source_cap = (
-                _source_middle_cap(source) if respect_late_reserve else middle_cap
-            )
-            if total >= source_cap or setting_duration[setting] >= setting_budget - 1e-6:
-                break
-            remaining_setting = setting_budget - setting_duration[setting]
-            remaining_total = source_cap - total
-            budget = min(remaining_setting, remaining_total)
-            selection = _selection_from_source(
-                source,
-                max_duration=budget,
-                avoid=selected_ranges.get(filename, []),
-            )
-            if selection is None:
-                break
-            selection["_role"] = "middle"
-            _commit(selection)
-
-    # Reserve coverage for each required setting.
-    # Use the full middle cap here so diversity is not blocked by the late-day hold.
-    # Late-day settings (night mall, etc.) get several distinct files up front;
-    # daytime settings stay at one reserved beat so play-heavy mornings cannot
-    # monopolize the reserve pass.
-    late_settings = {
-        infer_setting(clip)
-        for clip in pool[late_index:]
-        if infer_setting(clip) != "other"
-    }
-    for setting in required_settings:
-        candidates = [
-            clip
-            for clip in pool
-            if infer_setting(clip) == setting
-            and str(clip.get("metadata", {}).get("filename", "")) not in selected_files
-            and _in_middle_window(clip)
-            and not is_speechless_transit_pad(clip)
-        ]
-        if not candidates:
+        budget = min(source_duration, middle_cap - total)
+        selection = _selection_from_source(
+            source,
+            max_duration=budget,
+            avoid=selected_ranges.get(filename, []),
+            hard_cap_override=source_duration,
+            # MIN_SELECTION_SEC exists to avoid tiny leftover-budget stubs
+            # from repeated beats on one clip; irrelevant here since each
+            # clip gets exactly one selection, and rejecting a short but
+            # genuine excerpt would just drop the clip outright.
+            min_duration=0.35,
+        )
+        if selection is None:
             continue
-        candidates.sort(key=_clip_score, reverse=True)
-        # Scene-energy: don't force early transit/street pads just for diversity.
-        if (
-            arc == "scene_energy"
-            and setting not in late_settings
-            and not is_peak_kids_source(candidates[0])
-            and not is_arrival_source(candidates[0])
-        ):
-            continue
-        reserve_limit = 3 if setting in late_settings else 1
-        reserved = 0
-        for source in candidates:
-            if reserved >= reserve_limit:
-                break
-            filename = str(source.get("metadata", {}).get("filename", ""))
-            before = filename in selected_files
-            _try_add(
-                source,
-                allow_extra_beats=False,
-                respect_late_reserve=False,
-            )
-            if not before and filename in selected_files:
-                reserved += 1
+        selection["_role"] = "middle"
+        _commit(selection)
 
-    # Fill remaining budget.
-    # scene_energy: walk the day in capture order (contiguous scenes later).
-    # kids_energy: global peak-first. chronological: plain capture walk.
-    def _eligible_middle(source: dict[str, Any]) -> bool:
-        if is_speechless_transit_pad(source):
-            return False
-        if is_adult_meal_focus(source) and _clip_score(source) < 0.45:
-            return False
-        if is_arrival_source(source):
-            return True
-        if source_has_children(source):
-            return _clip_score(source) >= 0.28
-        return _clip_score(source) >= 0.35
-
-    def _can_add_more_beats(source: dict[str, Any]) -> bool:
-        filename = str(source.get("metadata", {}).get("filename", ""))
-        if filename not in selected_files:
-            return True
-        return (
-            allows_extra_play_beats(source)
-            and len(selected_ranges.get(filename, [])) < MAX_PLAY_BEATS_PER_CLIP
-        )
-
-    def _add_low_activity(sources: list[dict[str, Any]], *, low_ratio: float) -> None:
-        nonlocal total
-        low_cap = middle_cap * low_ratio
-        low_used = sum(
-            float(item["end"]) - float(item["start"])
-            for item in selected
-            if item.get("_role") == "middle" and not item.get("_peak", True)
-        )
-        low_pool = sorted(
-            [
-                clip
-                for clip in sources
-                if is_low_activity_source(clip) and not is_speechless_transit_pad(clip)
-            ],
-            key=lambda clip: (
-                0 if is_arrival_source(clip) else 1,
-                _capture_time(clip) or "9999",
-                str(clip.get("metadata", {}).get("filename", "")),
-            ),
-        )
-        for source in low_pool:
-            if total >= middle_cap or low_used >= low_cap - 1e-6:
-                break
-            if not _eligible_middle(source) or not _can_add_more_beats(source):
-                continue
-            before = total
-            _try_add(source, allow_extra_beats=False)
-            low_used += max(0.0, total - before)
-
-    if arc == "scene_energy":
-        # Keep day flow: peak kids sources in capture order, then a thin low-activity pad.
-        for source in pool:
-            if total >= middle_cap:
-                break
-            if not is_peak_kids_source(source):
-                continue
-            if not _eligible_middle(source) or not _can_add_more_beats(source):
-                continue
-            _try_add(source, allow_extra_beats=True)
-        _add_low_activity(pool, low_ratio=0.12)
-    elif arc == "kids_energy":
-        peak_pool = sorted(
-            [clip for clip in pool if is_peak_kids_source(clip)],
-            key=lambda clip: (
-                -kids_energy_score(clip),
-                _capture_time(clip) or "9999",
-                str(clip.get("metadata", {}).get("filename", "")),
-            ),
-        )
-        for source in peak_pool:
-            if total >= middle_cap:
-                break
-            if not _eligible_middle(source) or not _can_add_more_beats(source):
-                continue
-            _try_add(source, allow_extra_beats=True)
-        _add_low_activity(pool, low_ratio=0.24)
-    else:
-        for source in pool:
-            if total >= middle_cap:
-                break
-            if not _eligible_middle(source) or not _can_add_more_beats(source):
-                continue
-            _try_add(source, allow_extra_beats=True)
-
-    # CTA close after the body — must be last in capture order.
+    # CTA close after the body — last in the story, not necessarily last calendar day.
     last_body_time = ""
+    last_body_daypart = 0
     for item in selected:
         capture = str(item.get("_capture_time") or "")
         if capture >= last_body_time:
             last_body_time = capture
+        last_body_daypart = max(last_body_daypart, _item_daypart(item))
+    cta_daypart = last_body_daypart if scope == "all_days" else None
     for cta_source in _cta_close_candidates(
         pool,
         not_before_capture_time=last_body_time or open_time,
+        not_before_daypart=cta_daypart,
     ):
         filename = str(cta_source.get("metadata", {}).get("filename", ""))
         candidate = _selection_from_source(
@@ -1316,9 +1214,13 @@ def build_balanced_fallback_plan(
         )
         if candidate is None:
             continue
-        cta_time = str(candidate.get("_capture_time") or "")
-        if last_body_time and cta_time < last_body_time:
-            continue
+        if scope == "all_days":
+            if _item_daypart(candidate) < last_body_daypart:
+                continue
+        else:
+            cta_time = str(candidate.get("_capture_time") or "")
+            if last_body_time and cta_time < last_body_time:
+                continue
         candidate["_role"] = "cta"
         note = str(candidate.get("note", "")).strip()
         candidate["note"] = f"{note} CTA close b-roll.".strip()
@@ -1326,18 +1228,28 @@ def build_balanced_fallback_plan(
         _commit(candidate)
         break
 
-    # If the day already ended in the body, promote the chronologically last middle beat.
+    # If the day already ended in the body, promote the last story beat.
     if cta_selection is None:
         middle_sorted = [
             item for item in selected if item.get("_role") == "middle"
         ]
-        middle_sorted.sort(
-            key=lambda item: (
-                str(item.get("_capture_time") or "9999"),
-                float(item.get("start", 0)),
-                str(item.get("file", "")),
+        if scope == "all_days":
+            middle_sorted.sort(
+                key=lambda item: (
+                    _item_daypart(item),
+                    str(item.get("_capture_time") or "9999"),
+                    float(item.get("start", 0)),
+                    str(item.get("file", "")),
+                )
             )
-        )
+        else:
+            middle_sorted.sort(
+                key=lambda item: (
+                    str(item.get("_capture_time") or "9999"),
+                    float(item.get("start", 0)),
+                    str(item.get("file", "")),
+                )
+            )
         if middle_sorted:
             item = middle_sorted[-1]
             item["_role"] = "cta"
@@ -1348,6 +1260,22 @@ def build_balanced_fallback_plan(
     if arc == "chronological":
         selected.sort(
             key=lambda clip: (
+                str(clip.get("_capture_time") or "9999"),
+                float(clip.get("start", 0)),
+                str(clip.get("file", "")),
+            )
+        )
+    elif scope == "all_days":
+        selected.sort(
+            key=lambda clip: (
+                0
+                if clip.get("_role") == "open"
+                else 1
+                if clip.get("_role") == "arrival"
+                else 2
+                if clip.get("_role") == "middle"
+                else 3,
+                _item_daypart(clip),
                 str(clip.get("_capture_time") or "9999"),
                 float(clip.get("start", 0)),
                 str(clip.get("file", "")),
@@ -1369,60 +1297,6 @@ def build_balanced_fallback_plan(
                 str(clip.get("file", "")),
             )
         )
-
-    # Keep setting share under the validator's 40% of *plan* duration (not target).
-    # Prefer dropping middle beats; never drop reserved open/CTA bookends.
-    def _plan_total() -> float:
-        return sum(float(item["end"]) - float(item["start"]) for item in selected)
-
-    def _setting_share(setting: str) -> float:
-        """Setting share of the full plan; open/CTA durations count in the
-        denominator but only middle beats are eligible to be trimmed."""
-        total_dur = _plan_total()
-        if total_dur <= 0:
-            return 0.0
-        used = sum(
-            float(item["end"]) - float(item["start"])
-            for item in selected
-            if item.get("_role") == "middle" and str(item.get("_setting")) == setting
-        )
-        return used / total_dur
-
-    changed = True
-    while changed and selected:
-        changed = False
-        totals = _plan_total()
-        if totals <= 0:
-            break
-        overweight = [
-            setting
-            for setting, _ in setting_duration.items()
-            if _setting_share(setting) > 0.40 + 1e-6
-        ]
-        if not overweight:
-            break
-        setting = max(overweight, key=_setting_share)
-        # Drop lower-energy middle beats first so kids peaks survive share caps;
-        # never drop reserved open/CTA bookends.
-        middle = [
-            item
-            for item in selected
-            if item.get("_role") == "middle" and str(item.get("_setting")) == setting
-        ]
-        if not middle:
-            break
-        middle.sort(
-            key=lambda item: (
-                0 if not item.get("_peak", True) else 1,
-                float(item["end"]) - float(item["start"]),
-            )
-        )
-        victim = middle[0]
-        selected.remove(victim)
-        duration = float(victim["end"]) - float(victim["start"])
-        setting_duration[setting] = max(0.0, setting_duration[setting] - duration)
-        total = max(0.0, total - duration)
-        changed = True
 
     # If CTA ended up not last after chrono sort (same-time edge), keep role tags for sections.
     structure: list[dict[str, Any]] = []
@@ -1628,8 +1502,12 @@ def build_balanced_fallback_plan(
     elif arc == "scene_energy":
         # Simple time-of-day scenes (Morning/Afternoon/Evening/Night), not setting
         # buckets. Inside each scene, rank files best→better; keep each file's
-        # beats in order.
-        for cluster in cluster_contiguous_scenes(middle_items):
+        # beats in order. On merged multi-day pools, reorder the composite day
+        # morning->midday->evening->night instead of by calendar date.
+        for cluster in order_scene_clusters(
+            cluster_contiguous_scenes(middle_items),
+            planning_scope=scope,
+        ):
             if not cluster:
                 continue
             ranked = rank_clips_within_scene(cluster)
@@ -1663,7 +1541,11 @@ def build_balanced_fallback_plan(
         )
 
     if scope == "all_days":
-        day_note = " Planning scope: all capture days (still capture-time ordered)."
+        day_note = (
+            " Planning scope: all capture days, assembled as one composite day "
+            "(morning → midday → evening → night) so night footage never jumps "
+            "ahead of later-day daylight."
+        )
     elif primary_day not in {"", "unknown"}:
         day_note = f" Primary capture day: {primary_day}."
     else:
@@ -1809,8 +1691,10 @@ def _planning_prompt(episode: Episode, compact: list[dict[str, Any]], target: fl
     scope = normalize_planning_scope(episode.config.get("planning_scope", "primary_day"))
     if scope == "all_days":
         day_rule = (
-            "- Use footage from every capture day present in the analysis. Keep strict "
-            "capture_time order across days (earlier calendar days before later ones)."
+            "- Use footage from every capture day present in the analysis. Assemble "
+            "one composite day: morning → midday → evening → night. Later calendar "
+            "days may appear before earlier-day night footage. Do not cut night home "
+            "immediately after a morning greeting when later daylight still exists."
         )
     else:
         day_rule = (
@@ -1841,8 +1725,8 @@ Rules:
   still keeping capture chronology.
 - Pure visual shots usually last 2-6 seconds. Preserve complete useful speech.
 - Kids fooling-around / play / laugh narration is high value — keep complete exchanges
-  (often 20-55s). Do not strip playful speech just to hit pacing. Long play takes may
-  contribute 2-3 distinct non-overlapping beats instead of one tiny slice.
+  (often 20-55s, longer if the take stays engaging). Do not strip playful speech just to
+  hit pacing.
 - Open with a short greeting / start-of-day beat (about 12-22s) from early real footage
   when available (assalamualaikum / hai / pagi ini / mau kemana / arrival). Fall back to
   a playful cold-open only if no greeting exists.
@@ -1850,11 +1734,13 @@ Rules:
   about 12-24s) from late real footage. Do not invent clips. Keep capture_time order
   (open earliest, CTA latest).
 - Never start or end a spoken selection mid-sentence when a nearby ASR segment boundary fits.
-- Cover every major distinct location or activity that has usable footage, with at least
-  four settings when available on the chosen day.
-- No single setting or activity may consume more than 40% of the target duration unless
-  the source material genuinely contains no other usable setting.
-- Prefer 8-20 focused selections. Skip crumb cuts under ~10s when the source has a fuller beat.
+- No diversity requirement: use whichever footage is actually good, even if that means
+  one location or activity dominates the video. Judge selections purely on how
+  interesting/engaging they are, not on covering a spread of settings.
+- If the day's usable footage fits within the target duration, include essentially all of
+  it rather than trimming for pacing. Only cut when there is genuinely more usable footage
+  than the target duration allows, and then cut the least engaging material first.
+- Skip crumb cuts under ~10s when the source has a fuller beat.
 - Ranges must remain within source duration and may use a source more than once only for distinct ranges.
 - Aim within 25% of target duration. Do not fabricate filenames or transcript.
 
@@ -1902,6 +1788,7 @@ def _save_plan(
     target_mode: str,
     analysis: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    plan = attach_gameplay_matches(episode, plan)
     if analysis is not None:
         plan = _attach_audio(episode, plan, analysis)
     plan["target_duration_sec"] = target_duration
@@ -2003,7 +1890,8 @@ def create_plan(episode: Episode) -> dict[str, Any]:
         )
         if errors:
             day_repair = (
-                "Use every capture day present while keeping capture_time order."
+                "Use every capture day. Keep one composite day (morning → night); "
+                "later daylight may sit before earlier-day evening."
                 if scope == "all_days"
                 else (
                     "Keep selections in capture_time order and stay on one primary "
@@ -2018,9 +1906,8 @@ selected clip's (end - start) must be between {target_duration * 0.65:.1f} and
 preserve complete useful speech and fooling-around / play exchanges — do not
 delete funny kids narration to hit the budget.
 {day_repair} Prefer original files over duplicate Copy files.
-Cover the major distinct locations and activities from that day; use at least
-four settings when available, and do not let one setting consume more than 40%
-of the target duration.
+No diversity requirement — one location or activity may dominate if that's where the
+engaging footage is. Judge selections purely on interest, not on setting coverage.
 Validation errors:
 {json.dumps(errors, ensure_ascii=False)}
 

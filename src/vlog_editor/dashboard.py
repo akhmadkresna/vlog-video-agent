@@ -4,6 +4,7 @@ import hashlib
 import html
 import shutil
 import webbrowser
+from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from vlog_editor.kids_interest import (
 )
 from vlog_editor.media import thumbnail
 from vlog_editor.project import Episode, read_json, write_json
+from vlog_editor.transitions import plan_time_skip_cards, transitions_config
 
 
 def plan_digest(path: Path) -> str:
@@ -170,6 +172,39 @@ def _frame_strip_html(
     return '<div class="frame-strip" data-frame-review="1">' + "".join(cells) + "</div>"
 
 
+SFX_ICONS: dict[str, str] = {
+    "boing": "🎈",
+    "pop": "💥",
+    "whoosh": "💨",
+    "sparkle": "✨",
+    "rimshot": "🥁",
+    "fail": "❌",
+    "success": "✅",
+    "click": "👆",
+    "bruh": "😅",
+    "hype_voice": "🗣️",
+    "meme": "😂",
+}
+
+
+def _sfx_badge_html(cues: list[dict[str, Any]]) -> str:
+    """Inline chip per SFX cue landing inside this clip's edit-timeline span."""
+    if not cues:
+        return ""
+    chips = []
+    for cue in cues:
+        cue_type = str(cue.get("type", "sfx"))
+        icon = SFX_ICONS.get(cue_type, "🔊")
+        reason = html.escape(str(cue.get("reason", "")))
+        chips.append(
+            f'<span class="sfx-chip" title="{reason}">'
+            f'<code>{html.escape(format_clock(float(cue.get("at_sec", 0))))}</code> '
+            f"{icon} {html.escape(cue_type)}"
+            "</span>"
+        )
+    return f'<div class="sfx-chips">{"".join(chips)}</div>'
+
+
 def render_clip_card_html(
     episode: Episode,
     clip: dict[str, Any],
@@ -181,6 +216,7 @@ def render_clip_card_html(
     source_clip: dict[str, Any] | None,
     dashboard: Path,
     used_assets: set[Path],
+    sfx_cues: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build one storyboard card (used by dashboard + tests)."""
     start = float(clip["start"])
@@ -190,6 +226,15 @@ def render_clip_card_html(
     if wow is None and source_clip is not None:
         wow = source_wow_summary(source_clip, start=start, end=end)
     badge = _wow_badge_html(wow)
+    gameplay = clip.get("gameplay") if isinstance(clip.get("gameplay"), dict) else None
+    gameplay_badge = ""
+    if gameplay:
+        gameplay_badge = (
+            '<div class="gameplay-badge">🎮 Gameplay main + camera PIP · '
+            f'{html.escape(str(gameplay.get("file", "")))} · '
+            f'{float(gameplay.get("duration_sec", 0)):.1f}s overlap</div>'
+        )
+    sfx_html = _sfx_badge_html(sfx_cues or [])
     strip = _frame_strip_html(
         episode,
         dashboard,
@@ -205,7 +250,9 @@ def render_clip_card_html(
         f'<div class="time">Edit {format_clock(timeline_start)} → '
         f'{format_clock(timeline_end)} · {duration:.2f}s</div>'
         f'<div class="source">Source {start:.2f}s → {end:.2f}s</div>'
+        f"{gameplay_badge}"
         f"{badge}"
+        f"{sfx_html}"
         f'<p>{html.escape(str(clip.get("note", "")))}</p>'
         f'<p class="speech">{subtitle}</p>'
         f"{strip}</div></article>"
@@ -227,6 +274,29 @@ def _clip_cards(episode: Episode, plan: dict[str, Any]) -> tuple[str, set[Path]]
             analysis = None
     by_file = _analysis_by_filename(analysis)
 
+    # Same interval-based cards the render pipeline actually splices in, so
+    # the dashboard shows exactly which "X minutes later..." card lands
+    # after which clip.
+    skip_cards_by_index: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    trans_config = transitions_config(episode.config)
+    if bool(trans_config.get("enabled", True)):
+        for card in plan_time_skip_cards(
+            plan,
+            interval_sec=float(trans_config.get("interval_sec", 300.0)),
+            card_duration=float(trans_config.get("card_duration", 2.0)),
+        ):
+            skip_cards_by_index[int(card["after_index"])].append(card)
+
+    # SFX cues, matched to whichever clip's edit-timeline span they land in
+    # so the reviewer sees them in context instead of a disconnected list.
+    sfx_cues = sorted(
+        (cue for cue in plan.get("audio_cues", []) or [] if isinstance(cue, dict)),
+        key=lambda cue: float(cue.get("at_sec", 0)),
+    )
+    sfx_index = 0
+    total_clip_count = sum(len(section.get("clips", []) or []) for section in plan.get("structure", []) or [])
+    clip_counter = 0
+
     for section_index, section in enumerate(plan.get("structure", []), start=1):
         cards.append(
             f'<section><h2>{section_index}. {html.escape(str(section.get("section", "")))}</h2>'
@@ -245,6 +315,15 @@ def _clip_cards(episode: Episode, plan: dict[str, Any]) -> tuple[str, set[Path]]
             duration = end - start
             timeline_start = timeline_cursor
             timeline_end = timeline_cursor + duration
+            clip_counter += 1
+            is_last_clip = clip_counter == total_clip_count
+            clip_sfx: list[dict[str, Any]] = []
+            while sfx_index < len(sfx_cues) and (
+                float(sfx_cues[sfx_index].get("at_sec", 0)) < timeline_end
+                or (is_last_clip and float(sfx_cues[sfx_index].get("at_sec", 0)) <= timeline_end + 0.05)
+            ):
+                clip_sfx.append(sfx_cues[sfx_index])
+                sfx_index += 1
             timeline_cursor = timeline_end
             cards.append(
                 render_clip_card_html(
@@ -257,8 +336,17 @@ def _clip_cards(episode: Episode, plan: dict[str, Any]) -> tuple[str, set[Path]]
                     source_clip=by_file.get(str(clip["file"])),
                     dashboard=dashboard,
                     used_assets=used_thumbnails,
+                    sfx_cues=clip_sfx,
                 )
             )
+            for skip_card in skip_cards_by_index.get(clip_counter - 1, []):
+                skip_text = html.escape(str(skip_card.get("label", "")))
+                cards.append(
+                    '</div><div class="time-skip">'
+                    f'<span class="time-skip-clock">{format_clock(timeline_end)}</span>'
+                    f'<span class="time-skip-text">⏱ {skip_text}</span>'
+                    '</div><div class="grid">'
+                )
         cards.append("</div></section>")
     return "".join(cards), used_thumbnails
 
@@ -344,6 +432,8 @@ grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}} .card{{back
 border:1px solid #293242;border-radius:10px;overflow:hidden}} .card>img{{width:100%;aspect-ratio:16/9;
 object-fit:cover;background:#080a0d}} .body{{padding:14px}} .time{{font:13px ui-monospace;
 color:#7dd3fc;margin-top:6px}} .source{{font:12px ui-monospace;color:#9ca9ba;margin-top:4px}}
+.gameplay-badge{{margin-top:8px;padding:7px 9px;border-radius:8px;background:#183020;
+border:1px solid #2f855a;color:#bbf7d0;font-size:12px}}
 .speech{{color:#e8bd72}} code{{color:#7dd3fc}}
 .cues{{margin:8px 0 0;padding-left:18px;color:#c6d0db}} .cues li{{margin:4px 0}}
 .wow-badge{{margin-top:10px;padding:8px 10px;border-radius:8px;background:#101826;
@@ -359,6 +449,14 @@ border:1px solid #334155;font-size:13px}} .wow-badge.phase-setup{{opacity:.72}}
 .frame-meta{{padding:8px;font-size:11px;line-height:1.35}} .frame-time{{color:#7dd3fc;font-family:ui-monospace,monospace}}
 .frame-narration{{color:#e8bd72;margin-top:4px;max-height:4.2em;overflow:hidden}}
 .frame-wow{{color:#c7d2fe;margin-top:4px}} .frame-reasons{{color:#8b98a8;margin-top:2px}}
+.time-skip{{display:flex;align-items:center;gap:10px;margin:4px 0 14px;padding:10px 16px;
+border:1px dashed #7c6a3f;border-radius:8px;background:#1c1710;color:#f2d98a}}
+.time-skip-clock{{font:12px ui-monospace,monospace;opacity:.85;flex:0 0 auto}}
+.time-skip-text{{font-weight:600;letter-spacing:.02em}}
+.sfx-chips{{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}}
+.sfx-chip{{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:999px;
+background:#0f2a28;border:1px solid #2dd4bf;color:#99f6e4;font-size:12px;cursor:help}}
+.sfx-chip code{{color:#5eead4;font-size:11px}}
 </style></head>
 <body><header><h1>{html.escape(str(plan.get("title", "Vlog Plan")))}</h1>
 <div class="meta">{len(plan.get("structure", []))} sections ·

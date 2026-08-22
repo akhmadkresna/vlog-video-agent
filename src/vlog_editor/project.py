@@ -7,6 +7,10 @@ from typing import Any
 
 import yaml
 
+# Music sits under family dialogue, not beside it. Dialogue is peak-normalized near
+# full scale, so a bed above ~0.35 competes with speech even while ducking works.
+DEFAULT_BGM_VOLUME = 0.28
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "title": "My Vlog",
     "language": "auto",
@@ -28,7 +32,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "endpoint": "http://127.0.0.1:11434",
         "model": "qwen3-vl:4b-instruct",
         "frame_width": 1280,
-        "max_output_tokens": 240,
+        "max_output_tokens": 512,
         "keep_alive": "30m",
     },
     "audio": {
@@ -40,12 +44,29 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "bgm": {
         "file": None,
-        "volume": 0.85,
+        "volume": DEFAULT_BGM_VOLUME,
         # beds = intro / play / light B-roll / outro (default). full = whole edit.
         "mode": "beds",
     },
+    "gameplay": {
+        # Put screen/game recordings in gameplay/. "auto" enables matching when present.
+        "enabled": "auto",
+        "directory": "gameplay",
+        # Camera audio keeps reactions/lips synchronized; gameplay is visual-only.
+        "audio_source": "camera",
+        "min_overlap_sec": 2.0,
+        "pip": {
+            "width_ratio": 0.28,
+            "margin": 40,
+            "border": 6,
+            "position": "bottom_right",
+        },
+    },
     "captions": {
-        # Soft sidecar SRT by default; set burn_in true per episode to embed on video.
+        # Soft sidecar SRT by default — ASR (faster-whisper large-v3-turbo,
+        # int8_float16) isn't accurate enough to bake permanently into every
+        # render. Set burn_in true per episode once transcript quality is
+        # confirmed for that footage.
         "enabled": True,
         "burn_in": False,
         "max_chars": 42,
@@ -64,26 +85,39 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "outline_width": 4,
     },
     "transitions": {
-        # Original-design "X minutes later" cards, generated at render time (no
-        # external video downloaded/bundled) — snapped to the nearest clip
-        # boundary at/after each interval, skipped near the very end of the edit.
+        # Fixed "few minutes later" card image, spliced in at render time —
+        # snapped to the nearest clip boundary at/after each interval, skipped
+        # near the very end of the edit.
         "enabled": True,
         "interval_sec": 300.0,
         "card_duration": 2.0,
-        "bg_color": "0x1F6FEB",
-        "text_color": "white",
         # Punchy pop as each card appears (bundled meme boom by default).
         # Set "" to disable, or any other audio-pack cue type/role.
         "sfx_type": "boom",
         "sfx_gain": None,
     },
+    "youtube": {
+        "privacy": "unlisted",
+        "category_id": "24",
+        "made_for_kids": True,
+        "kids_destination": True,
+        "notify_subscribers": False,
+        "upload_captions": True,
+        "title": None,
+        "description": None,
+        "tags": [],
+        "playlist_id": None,
+        "contains_synthetic_media": False,
+        "paid_promotion": False,
+        "embeddable": True,
+    },
     # Default story shape for balanced plans. Override per episode in project.yaml.
+    # chronological = full capture-time order (default: simplest, matches how the day happened)
     # scene_energy = time-of-day scenes (Morning/Afternoon/Evening/Night) in capture order; best→better inside
     # kids_energy = open → global kids peak → peak 2 → quiet/adult → goodbye
-    # chronological = full capture-time order
-    "story_arc": "scene_energy",
+    "story_arc": "chronological",
     # primary_day = plan from the heaviest capture day only (default).
-    # all_days = use every dated day in footage/ (still capture-time ordered).
+    # all_days = every dated day, assembled as one composite day (morning → night).
     "planning_scope": "primary_day",
 }
 
@@ -121,6 +155,11 @@ class Episode:
     def audio(self) -> Path:
         return self.root / "audio"
 
+    @property
+    def gameplay(self) -> Path:
+        directory = Path(str(self.config.get("gameplay", {}).get("directory", "gameplay")))
+        return directory if directory.is_absolute() else self.root / directory
+
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
@@ -150,7 +189,7 @@ def create_episode(path: str | Path, *, force: bool = False) -> Episode:
     if root.exists() and any(root.iterdir()) and not force:
         raise FileExistsError(f"Refusing to overwrite non-empty directory: {root}")
     root.mkdir(parents=True, exist_ok=True)
-    for name in ("footage", "work", "output"):
+    for name in ("footage", "gameplay", "work", "output"):
         (root / name).mkdir(exist_ok=True)
     ensure_audio_pack_layout(root)
     config_path = root / "project.yaml"
