@@ -97,6 +97,23 @@ The planner places SFX on the edit timeline (transitions, laughs, meme punch mom
 with classic fallbacks, and never auto-downloads audio at runtime. See
 [`docs/audio-license-free.md`](docs/audio-license-free.md).
 
+## Time-skip transition cards
+
+Render inserts an original-design "X minutes later..." title card every
+`transitions.interval_sec` (default 300s / 5 min), snapped to the nearest clip
+boundary at/after each mark (never mid-clip, and skipped near the very end of
+the edit). It's a generated card (bundled OFL font, no external video), not a
+downloaded meme clip. Configure or disable per episode in `project.yaml`:
+
+```yaml
+transitions:
+  enabled: true
+  interval_sec: 300
+  card_duration: 2.0
+  bg_color: "0x1F6FEB"
+  text_color: white
+```
+
 ## Commands
 
 - `ve doctor [episode]`: check FFmpeg, CUDA, faster-whisper, Ollama and the model.

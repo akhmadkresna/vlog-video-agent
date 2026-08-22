@@ -416,6 +416,8 @@ def prepare_caption_files(
     episode: Any,
     plan: dict[str, Any],
     analysis: dict[str, Any],
+    *,
+    time_skip_cards: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Write soft SRT (+ ASS for burn-in) from plan+analysis. Returns caption metadata."""
     config = captions_config(episode.config)
@@ -430,6 +432,15 @@ def prepare_caption_files(
         max_cue_sec=float(config.get("max_cue_sec", 4.5)),
         min_cue_sec=float(config.get("min_cue_sec", 0.7)),
     )
+    if time_skip_cards:
+        from vlog_editor.transitions import shift_time
+
+        for word in [w for cue in cues for w in cue.get("words", [])]:
+            word["start"] = shift_time(word["start"], time_skip_cards)
+            word["end"] = shift_time(word["end"], time_skip_cards)
+        for cue in cues:
+            cue["start"] = shift_time(cue["start"], time_skip_cards)
+            cue["end"] = shift_time(cue["end"], time_skip_cards)
     srt_path = episode.output / "captions.srt"
     write_srt(cues, srt_path)
     ass_path: Path | None = None
