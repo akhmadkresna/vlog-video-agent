@@ -948,10 +948,15 @@ def test_long_play_clip_contributes_one_continuous_excerpt() -> None:
         for clip in section["clips"]
         if clip["file"] == "long-play.mov"
     ]
-    # Simplified selection: one continuous excerpt per clip, not several
-    # separate highlight beats stitched from the same source.
-    assert len(play_clips) == 1
-    assert play_clips[0]["end"] - play_clips[0]["start"] >= 10
+    # At most open head + one contiguous remainder — never several scattered
+    # highlight beats stitched from the same source.
+    assert 1 <= len(play_clips) <= 2
+    play_clips.sort(key=lambda clip: float(clip["start"]))
+    for clip in play_clips:
+        assert clip["end"] - clip["start"] >= 10
+    if len(play_clips) == 2:
+        assert play_clips[1]["start"] <= play_clips[0]["end"] + 10.0
+        assert play_clips[1]["end"] > play_clips[0]["end"]
 
 
 def test_toy_store_cars_are_not_vehicle_setting() -> None:
@@ -1313,3 +1318,69 @@ def test_balanced_plan_inserts_arrival_and_skips_speechless_vehicle() -> None:
         for clip in section["clips"]
     }
     assert "silent-car.mov" not in planned_files
+
+
+def test_free_spans_skips_avoided_ranges() -> None:
+    from vlog_editor.planner import free_spans
+
+    assert free_spans(100.0, []) == [(0.0, 100.0)]
+    assert free_spans(100.0, [(0.0, 22.0)]) == [(22.0, 100.0)]
+    assert free_spans(100.0, [(10.0, 20.0), (40.0, 55.0)]) == [
+        (0.0, 10.0),
+        (20.0, 40.0),
+        (55.0, 100.0),
+    ]
+    assert free_spans(50.0, [(-5.0, 10.0), (45.0, 80.0)]) == [(10.0, 45.0)]
+
+
+def test_balanced_plan_reuses_open_clip_remainder() -> None:
+    """Open greeting must not discard the rest of a long first take."""
+    greeting = _clip(
+        "home-long.mov",
+        400,
+        transcript="Hai halo mami kita makan buah potong yuk",
+        setting="home",
+        capture_time="2026-08-21T07:00:00.000000Z",
+        quality=0.9,
+        story_value=0.9,
+    )
+    greeting["visual"]["kids_audience_value"] = 0.9
+    greeting["visual"]["summary"] = "children eating fruit and playing at home"
+    greeting["visual"]["recommended_ranges"] = [{"start": 0, "end": 8}]
+    greeting["audio"]["segments"] = [
+        {"start": 0.2, "end": 8.0, "text": "Hai halo mami kita makan buah"},
+        {"start": 40.0, "end": 80.0, "text": "adek makan timun asin asin"},
+        {"start": 120.0, "end": 200.0, "text": "arkaan mau coba buah bintang"},
+    ]
+
+    bike = _clip(
+        "bike.mov",
+        60,
+        transcript="adik naik sepeda di rumah",
+        setting="home",
+        capture_time="2026-08-21T07:20:00.000000Z",
+        quality=0.9,
+        story_value=0.9,
+    )
+    bike["visual"]["kids_audience_value"] = 0.9
+    bike["visual"]["summary"] = "child rides a bicycle indoors"
+    bike["visual"]["recommended_ranges"] = [{"start": 0, "end": min(30, 60)}]
+
+    analysis = {"clips": [greeting, bike]}
+    target = 450.0
+    plan = build_balanced_fallback_plan(
+        analysis, target, title="Rumah", story_arc="chronological"
+    )
+    fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=target)
+    assert errors == []
+    home_clips = [
+        clip
+        for section in fixed["structure"]
+        for clip in section["clips"]
+        if clip["file"] == "home-long.mov"
+    ]
+    assert len(home_clips) >= 2
+    assert home_clips[0]["end"] - home_clips[0]["start"] <= 30.0
+    remainder = sum(clip["end"] - clip["start"] for clip in home_clips[1:])
+    assert remainder >= 200.0
+    assert fixed["duration_sec"] >= target * 0.65
