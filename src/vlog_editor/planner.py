@@ -251,6 +251,44 @@ def _complete_exchange(
     return start, max(end, min(cap, start + 0.35))
 
 
+def free_spans(
+    source_duration: float,
+    avoid: list[tuple[float, float]] | None = None,
+) -> list[tuple[float, float]]:
+    """Return contiguous [start, end) ranges inside the clip that are not avoided."""
+    duration = max(0.0, float(source_duration))
+    if duration <= 0:
+        return []
+    blocked: list[tuple[float, float]] = []
+    for raw_start, raw_end in avoid or []:
+        try:
+            start = max(0.0, float(raw_start))
+            end = min(duration, float(raw_end))
+        except (TypeError, ValueError):
+            continue
+        if end - start > 1e-6:
+            blocked.append((start, end))
+    if not blocked:
+        return [(0.0, duration)]
+    blocked.sort()
+    merged: list[tuple[float, float]] = [blocked[0]]
+    for start, end in blocked[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    free: list[tuple[float, float]] = []
+    cursor = 0.0
+    for start, end in merged:
+        if start - cursor > 1e-6:
+            free.append((cursor, start))
+        cursor = max(cursor, end)
+    if duration - cursor > 1e-6:
+        free.append((cursor, duration))
+    return free
+
+
 def constrain_selection_lengths(plan: dict[str, Any], target_duration: float) -> dict[str, Any]:
     constrained = copy.deepcopy(plan)
     selections = [
@@ -1069,7 +1107,6 @@ def build_balanced_fallback_plan(
     # strongest/most abundant footage is (removed per explicit request — was
     # rationing good footage down for balance).
     selected: list[dict[str, Any]] = []
-    selected_files: set[str] = set()
     selected_ranges: dict[str, list[tuple[float, float]]] = defaultdict(list)
     total = 0.0
     # Leave room for validator speech/segment expansion so multi-beats do not overlap.
@@ -1081,7 +1118,6 @@ def build_balanced_fallback_plan(
         nonlocal total
         filename = str(selection["file"])
         selected.append(selection)
-        selected_files.add(filename)
         span = (float(selection["start"]), float(selection["end"]))
         selected_ranges[filename].append(
             (max(0.0, span[0] - AVOID_PAD_SEC), span[1] + AVOID_PAD_SEC)
@@ -1150,45 +1186,106 @@ def build_balanced_fallback_plan(
     # Middle content: no per-setting diversity cap, no required-settings
     # reservation, no peak/low-activity split, no repeated highlight beats.
     # If the remaining footage fits under the pacing cap, keep all of it —
-    # one selection per clip, at full length. If it doesn't fit, keep the
-    # highest-energy clips first and let the weakest miss the cut; a
-    # speechless transit pad is excluded outright since it carries no energy
-    # to judge either way.
+    # one middle selection per clip (open/arrival may already have used the
+    # head of a long take; reuse that file via avoid ranges so the unused
+    # remainder still counts). If it doesn't fit, keep the highest-energy
+    # clips first and let the weakest miss the cut; a speechless transit pad
+    # is excluded outright since it carries no energy to judge either way.
     remaining_pool = [
         clip
         for clip in pool
-        if str(clip.get("metadata", {}).get("filename", "")) not in selected_files
-        and _in_middle_window(clip)
-        and not is_speechless_transit_pad(clip)
+        if _in_middle_window(clip) and not is_speechless_transit_pad(clip)
     ]
-    remaining_duration = sum(
-        max(0.0, float(clip.get("metadata", {}).get("duration", 0))) for clip in remaining_pool
-    )
+
+    def _unused_duration(clip: dict[str, Any]) -> float:
+        filename = str(clip.get("metadata", {}).get("filename", ""))
+        source_duration = max(0.0, float(clip.get("metadata", {}).get("duration", 0)))
+        return sum(
+            end - start
+            for start, end in free_spans(source_duration, selected_ranges.get(filename, []))
+        )
+
+    remaining_duration = sum(_unused_duration(clip) for clip in remaining_pool)
+    # Prefer keeping every unused take when the day still fits the target.
+    # Small slack covers open-pad / CTA-reserve accounting so a day that is
+    # essentially "keep everything" does not fall into highlight-excerpt mode.
+    fill_all = (remaining_duration + total) <= target_duration * 1.05 + 1e-6
     fill_order = (
         remaining_pool
-        if remaining_duration <= middle_cap
+        if fill_all
         else sorted(remaining_pool, key=_clip_score, reverse=True)
     )
+    middle_files: set[str] = set()
     for source in fill_order:
         if total >= middle_cap:
             break
         filename = str(source.get("metadata", {}).get("filename", ""))
-        source_duration = float(source.get("metadata", {}).get("duration", 0))
-        budget = min(source_duration, middle_cap - total)
-        selection = _selection_from_source(
-            source,
-            max_duration=budget,
-            avoid=selected_ranges.get(filename, []),
-            hard_cap_override=source_duration,
-            # MIN_SELECTION_SEC exists to avoid tiny leftover-budget stubs
-            # from repeated beats on one clip; irrelevant here since each
-            # clip gets exactly one selection, and rejecting a short but
-            # genuine excerpt would just drop the clip outright.
-            min_duration=0.35,
-        )
-        if selection is None:
+        if not filename or filename in middle_files:
             continue
+        source_duration = float(source.get("metadata", {}).get("duration", 0))
+        avoid = selected_ranges.get(filename, [])
+        unused = _unused_duration(source)
+        if unused < 0.35:
+            continue
+        budget = min(unused, middle_cap - total)
+        # Reclaim unused remainder of an open/arrival take as one contiguous
+        # free span — never a second scattered highlight from the same file.
+        reclaim_remainder = fill_all or bool(avoid)
+        if reclaim_remainder:
+            spans = free_spans(source_duration, avoid)
+            if not spans:
+                continue
+            span_start, span_end = max(spans, key=lambda item: item[1] - item[0])
+            take = min(budget, span_end - span_start)
+            if take < 0.35:
+                continue
+            end = span_start + take
+            segments = source.get("audio", {}).get("segments", [])
+            subtitle = " ".join(
+                str(segment.get("text", "")).strip()
+                for segment in segments
+                if float(segment.get("end", 0)) > span_start
+                and float(segment.get("start", 0)) < end
+            ).strip()
+            note = str(source.get("visual", {}).get("summary", ""))
+            if is_playful_source(source):
+                note = f"{note} Keep fooling-around / play beat.".strip()
+            hooks = source_kids_audience_categories(source)
+            if hooks:
+                note = f"{note} Kids-audience hooks: {', '.join(hooks)}.".strip()
+            selection = {
+                "file": filename,
+                "start": round(span_start, 3),
+                "end": round(end, 3),
+                "note": note,
+                "subtitle": subtitle,
+                "wow": source_wow_summary(source, start=span_start, end=end),
+                "_capture_time": _capture_time(source),
+                "_setting": infer_setting(source),
+                "_score": _clip_score(source),
+                "_playful": is_playful_source(source),
+                "_greeting": is_greeting_source(source),
+                "_arrival": is_arrival_source(source),
+                "_energy": kids_energy_score(source),
+                "_peak": is_peak_kids_source(source) or is_arrival_source(source),
+                "_kids_hooks": hooks,
+            }
+        else:
+            selection = _selection_from_source(
+                source,
+                max_duration=budget,
+                avoid=avoid,
+                hard_cap_override=source_duration,
+                # MIN_SELECTION_SEC exists to avoid tiny leftover-budget stubs
+                # from repeated beats on one clip; irrelevant here since each
+                # clip gets at most one middle selection, and rejecting a short
+                # but genuine excerpt would just drop the clip outright.
+                min_duration=0.35,
+            )
+            if selection is None:
+                continue
         selection["_role"] = "middle"
+        middle_files.add(filename)
         _commit(selection)
 
     # CTA close after the body — last in the story, not necessarily last calendar day.
@@ -1315,7 +1412,6 @@ def build_balanced_fallback_plan(
         item["_section_setting"] = setting
         item["_section_hooks"] = hooks
         if role == "open":
-            item.pop("_capture_time", None)
             item.pop("_energy", None)
             item.pop("_peak", None)
             item["_greeting_open"] = is_greeting_open or (
@@ -1323,7 +1419,7 @@ def build_balanced_fallback_plan(
             )
             open_clips.append(item)
         elif role == "arrival":
-            item.pop("_capture_time", None)
+            # Keep _capture_time through chronological interleave; emit pops it.
             item.pop("_energy", None)
             item.pop("_peak", None)
             item["_arrival_beat"] = is_arrival or (
@@ -1449,20 +1545,31 @@ def build_balanced_fallback_plan(
             }
         )
 
-    if arrival_clips:
-        for item in arrival_clips:
+    def _emit_arrival_section(clips: list[dict[str, Any]]) -> None:
+        cleaned: list[dict[str, Any]] = []
+        for item in clips:
             item.pop("_section_setting", None)
             item.pop("_section_hooks", None)
             item.pop("_arrival_beat", None)
+            item.pop("_capture_time", None)
+            item.pop("_energy", None)
+            item.pop("_peak", None)
+            cleaned.append(item)
         structure.append(
             {
                 "section": "Arrival",
                 "description": (
                     "Spoken destination arrival ('udah sampai…') — place the day before play peaks."
                 ),
-                "clips": arrival_clips,
+                "clips": cleaned,
             }
         )
+
+    # Non-chronological arcs keep Arrival pinned right after open. Chronological
+    # interleaves it with middle by capture time so reclaiming the open take's
+    # remainder cannot regress past a later arrival beat.
+    if arrival_clips and arc != "chronological":
+        _emit_arrival_section(arrival_clips)
 
     if arc == "kids_energy":
         peak_items = [item for item in middle_items if item.get("_peak")]
@@ -1513,9 +1620,42 @@ def build_balanced_fallback_plan(
             ranked = rank_clips_within_scene(cluster)
             daypart = time_of_day_bucket(str(ranked[0].get("_capture_time") or ""))
             structure.append(_storyboard_section(daypart, ranked))
-    else:
+    elif arc == "chronological":
+        body: list[tuple[str, dict[str, Any]]] = [
+            ("arrival", item) for item in arrival_clips
+        ] + [("middle", item) for item in middle_items]
+        body.sort(
+            key=lambda pair: (
+                str(pair[1].get("_capture_time") or "9999"),
+                float(pair[1].get("start", 0)),
+                str(pair[1].get("file", "")),
+            )
+        )
         current_setting: str | None = None
         current_clips: list[dict[str, Any]] = []
+
+        def _flush_middle() -> None:
+            nonlocal current_setting, current_clips
+            if current_setting and current_clips:
+                structure.append(_storyboard_section(current_setting, current_clips))
+            current_setting = None
+            current_clips = []
+
+        for kind, item in body:
+            if kind == "arrival":
+                _flush_middle()
+                _emit_arrival_section([item])
+                continue
+            setting = str(item.pop("_section_setting", "other"))
+            if setting != current_setting and current_clips:
+                structure.append(_storyboard_section(current_setting, current_clips))
+                current_clips = []
+            current_setting = setting
+            current_clips.append(item)
+        _flush_middle()
+    else:
+        current_setting = None
+        current_clips = []
         for item in middle_items:
             setting = str(item.pop("_section_setting", "other"))
             if setting != current_setting and current_clips:
