@@ -1384,3 +1384,76 @@ def test_balanced_plan_reuses_open_clip_remainder() -> None:
     remainder = sum(clip["end"] - clip["start"] for clip in home_clips[1:])
     assert remainder >= 200.0
     assert fixed["duration_sec"] >= target * 0.65
+
+
+def test_chronological_interleaves_arrival_after_open_remainder() -> None:
+    """Arrival must not jump ahead of the open take's later remainder."""
+    early = _clip(
+        "dino-long.mov",
+        400,
+        transcript="Assalamualaikum pagi ini mau kemana yuk berangkat",
+        setting="attraction",
+        capture_time="2026-08-22T11:10:00.000000Z",
+        quality=0.9,
+        story_value=0.9,
+    )
+    early["visual"]["kids_audience_value"] = 0.9
+    early["visual"]["summary"] = "kids ride dinosaurs and play at the park"
+    early["visual"]["subjects"] = ["children", "dinosaurs"]
+    early["audio"]["segments"] = [
+        {
+            "start": 0.2,
+            "end": 10.0,
+            "text": "Assalamualaikum pagi ini mau kemana yuk berangkat",
+        },
+        {"start": 40.0, "end": 200.0, "text": "arkaan naik dinosaurus wii"},
+    ]
+    arrival = _clip(
+        "arrived.mov",
+        40,
+        transcript="Hai udah sampai di dyno ada kolam renangnya",
+        setting="attraction",
+        capture_time="2026-08-22T11:48:00.000000Z",
+        quality=0.9,
+        story_value=0.9,
+    )
+    arrival["visual"]["kids_audience_value"] = 0.9
+    arrival["visual"]["summary"] = "family arrives at dinosaur park with pools"
+    arrival["visual"]["subjects"] = ["family", "park"]
+    arrival["audio"]["segments"] = [
+        {"start": 0.0, "end": 8.0, "text": "Hai udah sampai di dyno ada kolam"},
+    ]
+    bye = _clip(
+        "bye.mov",
+        30,
+        transcript="dadah ya makasih see you",
+        setting="outdoor",
+        capture_time="2026-08-22T12:10:00.000000Z",
+    )
+    bye["visual"]["summary"] = "child smiles and waves goodbye"
+    bye["visual"]["subjects"] = ["child"]
+    analysis = {"clips": [early, arrival, bye]}
+    plan = build_balanced_fallback_plan(
+        analysis, 420, title="Dyno", story_arc="chronological"
+    )
+    fixed, errors = validate_and_fix_plan(plan, analysis, target_duration=420)
+    assert not [error for error in errors if "capture time" in error]
+    sections = [section["section"] for section in fixed["structure"]]
+    assert sections[0] in {"Greeting open", "Playful open"}
+    assert "Arrival" in sections
+    flat = [
+        (section["section"], clip["file"], float(clip["start"]))
+        for section in fixed["structure"]
+        for clip in section["clips"]
+    ]
+    assert flat[0][1] == "dino-long.mov"
+    early_middle = [
+        index
+        for index, (section, name, _start) in enumerate(flat)
+        if name == "dino-long.mov" and section not in {"Greeting open", "Playful open"}
+    ]
+    arrival_idx = next(
+        index for index, (section, _, _) in enumerate(flat) if section == "Arrival"
+    )
+    assert early_middle
+    assert early_middle[0] < arrival_idx

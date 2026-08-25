@@ -1412,7 +1412,6 @@ def build_balanced_fallback_plan(
         item["_section_setting"] = setting
         item["_section_hooks"] = hooks
         if role == "open":
-            item.pop("_capture_time", None)
             item.pop("_energy", None)
             item.pop("_peak", None)
             item["_greeting_open"] = is_greeting_open or (
@@ -1420,7 +1419,7 @@ def build_balanced_fallback_plan(
             )
             open_clips.append(item)
         elif role == "arrival":
-            item.pop("_capture_time", None)
+            # Keep _capture_time through chronological interleave; emit pops it.
             item.pop("_energy", None)
             item.pop("_peak", None)
             item["_arrival_beat"] = is_arrival or (
@@ -1546,20 +1545,31 @@ def build_balanced_fallback_plan(
             }
         )
 
-    if arrival_clips:
-        for item in arrival_clips:
+    def _emit_arrival_section(clips: list[dict[str, Any]]) -> None:
+        cleaned: list[dict[str, Any]] = []
+        for item in clips:
             item.pop("_section_setting", None)
             item.pop("_section_hooks", None)
             item.pop("_arrival_beat", None)
+            item.pop("_capture_time", None)
+            item.pop("_energy", None)
+            item.pop("_peak", None)
+            cleaned.append(item)
         structure.append(
             {
                 "section": "Arrival",
                 "description": (
                     "Spoken destination arrival ('udah sampai…') — place the day before play peaks."
                 ),
-                "clips": arrival_clips,
+                "clips": cleaned,
             }
         )
+
+    # Non-chronological arcs keep Arrival pinned right after open. Chronological
+    # interleaves it with middle by capture time so reclaiming the open take's
+    # remainder cannot regress past a later arrival beat.
+    if arrival_clips and arc != "chronological":
+        _emit_arrival_section(arrival_clips)
 
     if arc == "kids_energy":
         peak_items = [item for item in middle_items if item.get("_peak")]
@@ -1610,9 +1620,42 @@ def build_balanced_fallback_plan(
             ranked = rank_clips_within_scene(cluster)
             daypart = time_of_day_bucket(str(ranked[0].get("_capture_time") or ""))
             structure.append(_storyboard_section(daypart, ranked))
-    else:
+    elif arc == "chronological":
+        body: list[tuple[str, dict[str, Any]]] = [
+            ("arrival", item) for item in arrival_clips
+        ] + [("middle", item) for item in middle_items]
+        body.sort(
+            key=lambda pair: (
+                str(pair[1].get("_capture_time") or "9999"),
+                float(pair[1].get("start", 0)),
+                str(pair[1].get("file", "")),
+            )
+        )
         current_setting: str | None = None
         current_clips: list[dict[str, Any]] = []
+
+        def _flush_middle() -> None:
+            nonlocal current_setting, current_clips
+            if current_setting and current_clips:
+                structure.append(_storyboard_section(current_setting, current_clips))
+            current_setting = None
+            current_clips = []
+
+        for kind, item in body:
+            if kind == "arrival":
+                _flush_middle()
+                _emit_arrival_section([item])
+                continue
+            setting = str(item.pop("_section_setting", "other"))
+            if setting != current_setting and current_clips:
+                structure.append(_storyboard_section(current_setting, current_clips))
+                current_clips = []
+            current_setting = setting
+            current_clips.append(item)
+        _flush_middle()
+    else:
+        current_setting = None
+        current_clips = []
         for item in middle_items:
             setting = str(item.pop("_section_setting", "other"))
             if setting != current_setting and current_clips:
