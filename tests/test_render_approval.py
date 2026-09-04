@@ -60,7 +60,10 @@ def test_render_command_builds_nvenc_filter_graph(
     assert "h264_nvenc" in command
     assert "concat=n=1:v=1:a=1" in filters
     assert "afade=t=in" in filters
-    assert "dynaudnorm=f=150:g=12:p=0.9" in filters
+    # Speech clarity chain: rumble filter + leveling per clip, loudness anchor after concat.
+    assert "highpass=f=85" in filters
+    assert "acompressor=" in filters
+    assert "loudnorm=I=-15:TP=-1.5:LRA=11" in filters
 
 
 def test_render_uses_portable_filtergraph_and_gpu_decode(
@@ -91,6 +94,60 @@ def test_render_hwaccel_can_be_disabled(
     monkeypatch.setattr("vlog_editor.render._encoder", lambda: ("h264_nvenc", ["-cq", "19"]))
     command, _filters, _ = build_render_command(episode, _plan(), episode.output / "final.mp4")
     assert "-hwaccel" not in command
+
+
+def test_gameplay_layer_fills_frame_and_honours_source_crop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    episode = _episode(tmp_path)
+    episode.config["gameplay"]["source_crop"] = "1222:720:58:0"
+    (episode.footage / "clip.mp4").write_bytes(b"camera")
+    (episode.gameplay / "game.mp4").write_bytes(b"game")
+    plan = _plan()
+    plan["structure"][0]["clips"][0]["gameplay"] = {
+        "file": "game.mp4",
+        "mode": "game_main_camera_pip",
+        "camera_offset_sec": 0.0,
+        "game_start_sec": 0.0,
+        "duration_sec": 2.0,
+        "audio_source": "camera",
+    }
+    monkeypatch.setattr("vlog_editor.render.probe_video", lambda _: {"has_audio": True})
+    monkeypatch.setattr("vlog_editor.render._encoder", lambda: ("h264_nvenc", ["-cq", "19"]))
+    _command, filters, _ = build_render_command(episode, plan, episode.output / "final.mp4")
+    game_line = next(line for line in filters.split(";\n") if line.strip().startswith("[1:v]"))
+    # literal crop applied, then cover-scale + centre-crop so no black bar shows
+    assert "crop=1222:720:58:0" in game_line
+    assert "force_original_aspect_ratio=increase" in game_line
+    assert f"crop={episode.config['output']['width']}:{episode.config['output']['height']}" in game_line
+    # camera layer still letterbox-safe (never crop faces)
+    cam_line = next(line for line in filters.split(";\n") if line.strip().startswith("[0:v]"))
+    assert "force_original_aspect_ratio=decrease" in cam_line
+
+
+def test_gameplay_source_crop_can_be_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    episode = _episode(tmp_path)
+    episode.config["gameplay"]["source_crop"] = "none"
+    (episode.footage / "clip.mp4").write_bytes(b"camera")
+    (episode.gameplay / "game.mp4").write_bytes(b"game")
+    plan = _plan()
+    plan["structure"][0]["clips"][0]["gameplay"] = {
+        "file": "game.mp4",
+        "mode": "game_main_camera_pip",
+        "camera_offset_sec": 0.0,
+        "game_start_sec": 0.0,
+        "duration_sec": 2.0,
+        "audio_source": "camera",
+    }
+    monkeypatch.setattr("vlog_editor.render.probe_video", lambda _: {"has_audio": True})
+    monkeypatch.setattr("vlog_editor.render._encoder", lambda: ("h264_nvenc", ["-cq", "19"]))
+    _command, filters, _ = build_render_command(episode, plan, episode.output / "final.mp4")
+    game_line = next(line for line in filters.split(";\n") if line.strip().startswith("[1:v]"))
+    assert "crop=1222" not in game_line
+    # still fills the frame, just without a source-border trim
+    assert "force_original_aspect_ratio=increase" in game_line
 
 
 def test_render_command_builds_game_main_with_camera_pip(
@@ -180,11 +237,11 @@ def test_bgm_graph_splits_original_audio_before_ducking(
     monkeypatch.setattr("vlog_editor.render.probe_video", lambda _: {"has_audio": True})
     monkeypatch.setattr("vlog_editor.render._encoder", lambda: ("libx264", ["-crf", "18"]))
     _, filters, _ = build_render_command(episode, _plan(), episode.output / "final.mp4")
-    assert "dynaudnorm=f=150:g=12:p=0.9" in filters
+    assert "loudnorm=I=-15:TP=-1.5:LRA=11" in filters
     assert "[dialogue_norm]asplit=2[original][sidechain]" in filters
     assert (
-        "[music][sidechain]sidechaincompress=threshold=0.03:ratio=8:"
-        "attack=15:release=450:makeup=1:mix=1[ducked]"
+        "[music][sidechain]sidechaincompress=threshold=0.05:ratio=12:"
+        "attack=8:release=320:makeup=1:mix=1[ducked]"
     ) in filters
 
 

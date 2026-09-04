@@ -9,7 +9,7 @@ import yaml
 
 # Music sits under family dialogue, not beside it. Dialogue is peak-normalized near
 # full scale, so a bed above ~0.35 competes with speech even while ducking works.
-DEFAULT_BGM_VOLUME = 0.28
+DEFAULT_BGM_VOLUME = 0.22
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "title": "My Vlog",
