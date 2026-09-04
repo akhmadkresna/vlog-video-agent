@@ -107,12 +107,29 @@ def build_render_command(
         cards_by_index[int(card["after_index"])].append(card)
 
     command = ["ffmpeg", "-y", "-hide_banner"]
+
+    # GPU-decode the source before filtering. The camera footage here is 4K60
+    # HEVC; software-decoding it for every cut runs at well under 1x. "-hwaccel
+    # cuda" routes decode through NVDEC and hands CPU frames to the filter
+    # graph (scale/overlay/pad stay on CPU, so no filtergraph changes needed).
+    # Set output.hwaccel to "none" to force software decode.
+    hwaccel = str(episode.config.get("output", {}).get("hwaccel", "cuda")).strip().lower()
+    decode_prefix = [] if hwaccel in {"", "none", "off"} else ["-hwaccel", hwaccel]
+
     metadata: list[dict[str, Any]] = []
     for clip in selections:
         start = float(clip["start"])
         duration = float(clip["end"]) - start
         source = episode.footage / str(clip["file"])
-        command += ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)]
+        command += [
+            *decode_prefix,
+            "-ss",
+            f"{start:.3f}",
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            str(source),
+        ]
         metadata.append(
             {
                 "duration": duration,
@@ -133,6 +150,7 @@ def build_render_command(
             raise FileNotFoundError(f"Gameplay file missing: {game_path}")
         game_duration = float(gameplay["duration_sec"])
         command += [
+            *decode_prefix,
             "-ss",
             f"{float(gameplay['game_start_sec']):.3f}",
             "-t",
@@ -214,6 +232,25 @@ def build_render_command(
     pip_outer_height = pip_height + 2 * pip_border
     pip_x = pip_margin if "left" in pip_position else width - pip_outer_width - pip_margin
     pip_y = pip_margin if "top" in pip_position else height - pip_outer_height - pip_margin
+
+    # Optional intro: hold on the full camera for a beat, then dissolve to the
+    # game-with-PIP layout. Applies once, to the first gameplay-backed cut.
+    # Opt-in via project.yaml (gameplay.intro.cam_hold_sec > 0); off by default
+    # so non-intro renders are byte-for-byte unchanged.
+    intro_config = episode.config.get("gameplay", {}).get("intro", {})
+    intro_hold = max(0.0, float(intro_config.get("cam_hold_sec", 0.0)))
+    intro_transition = max(0.05, float(intro_config.get("transition_sec", 1.0)))
+    intro_index: int | None = None
+    if intro_hold > 0:
+        intro_index = next(
+            (
+                idx
+                for idx, candidate in enumerate(metadata)
+                if isinstance(candidate.get("gameplay"), dict)
+            ),
+            None,
+        )
+
     for index, item in enumerate(metadata):
         duration = item["duration"]
         video_normalize = (
@@ -222,7 +259,41 @@ def build_render_command(
             f"fps={fps},setsar=1,format=yuv420p,setpts=PTS-STARTPTS"
         )
         gameplay = item.get("gameplay")
-        if isinstance(gameplay, dict):
+        if isinstance(gameplay, dict) and index == intro_index:
+            game_index = int(item["gameplay_input_index"])
+            offset = float(gameplay["camera_offset_sec"])
+            game_duration = float(gameplay["duration_sec"])
+            game_end = offset + game_duration
+            # Dissolve starts after the hold (but never before the gameplay
+            # footage itself begins), ramps over the transition, then stays.
+            reveal_at = max(offset, min(intro_hold, max(0.0, game_end - intro_transition)))
+            filters.append(
+                f"[{index}:v]{video_normalize},split=2[cam_base{index}][cam_pip{index}]"
+            )
+            filters.append(
+                f"[{game_index}:v]{video_normalize},"
+                f"setpts=PTS+{offset:.3f}/TB[game{index}]"
+            )
+            filters.append(
+                f"[cam_pip{index}]scale={pip_width}:{pip_height},"
+                f"pad={pip_outer_width}:{pip_outer_height}:{pip_border}:{pip_border}:white"
+                f"[pip{index}]"
+            )
+            # Bake game + PIP into one layer, then fade its alpha in so the
+            # full-cam opening cross-dissolves into the game-with-PIP layout.
+            filters.append(
+                f"[game{index}][pip{index}]overlay={pip_x}:{pip_y}:eof_action=pass"
+                f"[compo{index}]"
+            )
+            filters.append(
+                f"[compo{index}]format=yuva420p,"
+                f"fade=t=in:st={reveal_at:.3f}:d={intro_transition:.3f}:alpha=1[compo_fade{index}]"
+            )
+            filters.append(
+                f"[cam_base{index}][compo_fade{index}]overlay=0:0:eof_action=pass:"
+                f"enable='between(t,{reveal_at:.3f},{game_end:.3f})'[v{index}]"
+            )
+        elif isinstance(gameplay, dict):
             game_index = int(item["gameplay_input_index"])
             offset = float(gameplay["camera_offset_sec"])
             game_duration = float(gameplay["duration_sec"])
@@ -400,7 +471,9 @@ def build_render_command(
 
     codec, codec_args = _encoder()
     command += [
-        "-filter_complex_script",
+        # ffmpeg 7.0 removed -filter_complex_script; "-/<opt> <file>" reads any
+        # option value from a file and works on ffmpeg >= 5.1.
+        "-/filter_complex",
         str(episode.work / "render_filter.txt"),
         "-map",
         video_map,

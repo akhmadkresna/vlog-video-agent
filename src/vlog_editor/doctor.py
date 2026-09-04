@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import urllib.error
@@ -38,6 +39,33 @@ def inspect_machine(config: dict[str, Any]) -> tuple[list[str], list[str]]:
             ok.append("NVENC: h264_nvenc available")
         else:
             problems.append("NVENC: h264_nvenc unavailable; rendering will use libx264")
+
+        # The render passes its filtergraph with "-/filter_complex FILE".
+        # "-filter_complex_script" was removed in ffmpeg 7.0, and the "-/opt"
+        # file-read form needs ffmpeg >= 5.1 — verify this build is new enough
+        # rather than discovering it only when a render aborts on frame 1.
+        version_line = _run([ffmpeg, "-hide_banner", "-version"]).stdout.splitlines()
+        version = version_line[0].strip() if version_line else "ffmpeg version unknown"
+        match = re.search(r"version\s+n?(\d+)\.(\d+)", version)
+        if match and (int(match.group(1)), int(match.group(2))) < (5, 1):
+            problems.append(
+                f"ffmpeg too old for '-/filter_complex' (need >= 5.1): {version}. "
+                "Render aborts at start — upgrade ffmpeg."
+            )
+        else:
+            ok.append(f"ffmpeg filtergraph syntax OK ('-/filter_complex'): {version}")
+
+        # 4K/60 HEVC camera footage is unwatchably slow to software-decode; the
+        # render relies on "-hwaccel cuda" (NVDEC). Flag a build without it so a
+        # multi-hour render is a choice, not a surprise.
+        hwaccels = _run([ffmpeg, "-hide_banner", "-hwaccels"]).stdout
+        if "cuda" in hwaccels:
+            ok.append("GPU decode: -hwaccel cuda available (NVDEC)")
+        else:
+            problems.append(
+                "GPU decode: cuda hwaccel unavailable; 4K source renders will be very slow "
+                "(set output.hwaccel: none to silence, or install an ffmpeg with NVDEC)"
+            )
 
     nvidia_smi = shutil.which("nvidia-smi")
     if nvidia_smi:

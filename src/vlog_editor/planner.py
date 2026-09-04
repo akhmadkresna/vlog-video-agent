@@ -899,6 +899,54 @@ def _selection_from_source(
     }
 
 
+def _chapter_selection(
+    source: dict[str, Any],
+    start: float,
+    end: float,
+) -> dict[str, Any] | None:
+    """A plain time-window beat from a long take — no speech anchor required.
+
+    Used to chapterize a single long clip when speech-anchored selection has
+    run out of transcript to work with. Enrichment mirrors
+    ``_selection_from_source`` so downstream (validation, dashboard, gameplay
+    matching, render) treats it identically.
+    """
+    metadata = source.get("metadata", {})
+    source_duration = max(0.0, float(metadata.get("duration", 0)))
+    start = max(0.0, float(start))
+    end = min(source_duration, float(end))
+    if end - start < MIN_SELECTION_SEC - 1e-6:
+        return None
+    segments = source.get("audio", {}).get("segments", [])
+    subtitle = " ".join(
+        str(segment.get("text", "")).strip()
+        for segment in segments
+        if float(segment.get("end", 0)) > start and float(segment.get("start", 0)) < end
+    ).strip()
+    note = str(source.get("visual", {}).get("summary", "")).strip()
+    hooks = source_kids_audience_categories(source)
+    if hooks:
+        note = f"{note} Kids-audience hooks: {', '.join(hooks)}.".strip()
+    note = f"{note} Chapter beat.".strip()
+    return {
+        "file": str(metadata.get("filename", "")),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "note": note,
+        "subtitle": subtitle,
+        "wow": source_wow_summary(source, start=start, end=end),
+        "_capture_time": _capture_time(source),
+        "_setting": infer_setting(source),
+        "_score": _clip_score(source),
+        "_playful": is_playful_source(source),
+        "_greeting": False,
+        "_arrival": False,
+        "_energy": kids_energy_score(source),
+        "_peak": is_peak_kids_source(source),
+        "_kids_hooks": hooks,
+    }
+
+
 def _pick_open_source(
     pool: list[dict[str, Any]],
     *,
@@ -1190,6 +1238,75 @@ def build_balanced_fallback_plan(
             continue
         selection["_role"] = "middle"
         _commit(selection)
+
+    # Chapterize a thin clip pool. The pass above takes one speech-anchored
+    # excerpt per source, so a shoot that is a single long take (e.g. one
+    # camera clip + one screen recording) only ever contributes ~one beat and
+    # lands far under the pacing budget — and any stretch the transcript does
+    # not cover (silent gameplay, wordless reactions) is invisible to
+    # select_excerpt entirely. When the one-excerpt pass leaves the plan
+    # short, walk the sources already in play forward in fixed chapters,
+    # taking every stretch that does not overlap an existing pick, until the
+    # budget is met. The time-skip cards land between the resulting chapters.
+    # Guard rails: only stitch extra beats from one source when the shoot is
+    # genuinely a thin pool (one long take, or a camera clip paired with a
+    # screen recording) AND the one-excerpt pass has left the plan under the
+    # duration validator's floor, where it would be rejected outright. A normal
+    # multi-clip shoot keeps its single continuous excerpt per clip.
+    CHAPTER_BEAT_SEC = PLAY_MAX_SELECTION_SEC
+    CHAPTER_GAP_SEC = 1.0
+    CHAPTER_MAX_DISTINCT_SOURCES = 2
+    chapter_floor = target_duration * 0.65
+    chapter_target = min(middle_cap, chapter_floor + CHAPTER_BEAT_SEC)
+    chapter_sources = sorted(
+        (
+            source
+            for source in pool
+            if str(source.get("metadata", {}).get("filename", "")) in selected_files
+            and _in_middle_window(source)
+            and not is_speechless_transit_pad(source)
+        ),
+        key=lambda source: (
+            _capture_time(source) or "9999",
+            str(source.get("metadata", {}).get("filename", "")),
+        ),
+    )
+    if (
+        len(selected_files) <= CHAPTER_MAX_DISTINCT_SOURCES
+        and total < chapter_floor
+        and total + MIN_SELECTION_SEC <= chapter_target
+    ):
+        for source in chapter_sources:
+            metadata = source.get("metadata", {})
+            filename = str(metadata.get("filename", ""))
+            source_duration = max(0.0, float(metadata.get("duration", 0)))
+            cursor = 0.0
+            while (
+                total + MIN_SELECTION_SEC <= chapter_target
+                and cursor + MIN_SELECTION_SEC <= source_duration
+            ):
+                beat_end = min(
+                    source_duration, cursor + min(CHAPTER_BEAT_SEC, chapter_target - total)
+                )
+                blocker = next(
+                    (
+                        span
+                        for span in sorted(selected_ranges.get(filename, []))
+                        if min(beat_end, span[1]) - max(cursor, span[0]) > 0.35
+                    ),
+                    None,
+                )
+                if blocker is not None:
+                    if blocker[0] - cursor >= MIN_SELECTION_SEC:
+                        beat_end = blocker[0]
+                    else:
+                        cursor = blocker[1] + CHAPTER_GAP_SEC
+                        continue
+                selection = _chapter_selection(source, cursor, beat_end)
+                if selection is not None:
+                    selection["_role"] = "middle"
+                    _commit(selection)
+                cursor = beat_end + CHAPTER_GAP_SEC
 
     # CTA close after the body — last in the story, not necessarily last calendar day.
     last_body_time = ""
