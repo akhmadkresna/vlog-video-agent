@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import itertools
+
 import pytest
 
 from vlog_editor.planner import (
@@ -952,6 +954,46 @@ def test_long_play_clip_contributes_one_continuous_excerpt() -> None:
     # separate highlight beats stitched from the same source.
     assert len(play_clips) == 1
     assert play_clips[0]["end"] - play_clips[0]["start"] >= 10
+
+
+def test_single_long_take_is_chapterized_to_reach_target() -> None:
+    # A gameplay-vlog shoot: one long camera clip whose transcript covers only
+    # the first third (talk up front, then wordless play). One speech-anchored
+    # excerpt per clip lands ~30s, far below the 900s target's 585s floor, so
+    # the planner must stitch forward chapters through the silent stretch.
+    segments = [
+        {"start": 3, "end": 9, "text": "halo guys ini kita main game bareng adek"},
+        {"start": 40, "end": 70, "text": "ayo kita mulai sekarang seru banget"},
+        {"start": 150, "end": 180, "text": "gilir aku dong pegang stik nya"},
+    ]
+    analysis = {
+        "clips": [
+            {
+                "metadata": {
+                    "filename": "DJI_0001.MP4",
+                    "duration": 900,
+                    "capture_time": "2026-08-25T01:00:00.000000Z",
+                },
+                "audio": {"text": " ".join(s["text"] for s in segments), "segments": segments, "words": []},
+                "visual": {
+                    "setting": "home",
+                    "summary": "a man and two kids playing video games at home",
+                    "quality": 0.7,
+                    "story_value": 0.3,
+                    "recommended_ranges": [{"start": 0, "end": 8}],
+                },
+            }
+        ]
+    }
+    plan = build_balanced_fallback_plan(analysis, 900, title="Game session")
+    clips = [clip for section in plan["structure"] for clip in section["clips"]]
+    total = sum(clip["end"] - clip["start"] for clip in clips)
+    assert len(clips) >= 6
+    assert 900 * 0.65 <= total <= 900 * 1.35
+    ordered = sorted(clips, key=lambda clip: clip["start"])
+    for earlier, later in itertools.pairwise(ordered):
+        assert later["start"] >= earlier["end"] - 1e-6  # chapters never overlap
+    assert ordered[-1]["end"] >= 500  # coverage runs well past the 180s of transcript
 
 
 def test_toy_store_cars_are_not_vehicle_setting() -> None:

@@ -11,11 +11,17 @@ No footage, frames, transcripts, or prompts are sent to a paid service. Ollama l
 
 - NVIDIA RTX 4060 8 GB
 - 32 GB RAM
-- Windows FFmpeg with `h264_nvenc`
+- Windows FFmpeg **7.0 or newer**, with `h264_nvenc` and `cuda` hwaccel (NVDEC)
 - Ollama `qwen3-vl:4b-instruct` (Q4, about 3.3 GB)
 - faster-whisper `large-v3-turbo` with CUDA `int8_float16`
 
 ASR and vision run as separate phases so their models do not compete for VRAM.
+
+The render passes its filtergraph with `-/filter_complex FILE` (needs FFmpeg
+5.1+; the older `-filter_complex_script` was removed in 7.0) and GPU-decodes the
+source with `-hwaccel cuda` — 4K/60 HEVC camera footage is far too slow to
+software-decode. `ve doctor` checks both. Force software decode with
+`output.hwaccel: none` in `project.yaml` if a machine has no NVDEC.
 
 ## Setup
 

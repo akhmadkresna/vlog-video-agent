@@ -63,6 +63,36 @@ def test_render_command_builds_nvenc_filter_graph(
     assert "dynaudnorm=f=150:g=12:p=0.9" in filters
 
 
+def test_render_uses_portable_filtergraph_and_gpu_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    episode = _episode(tmp_path)
+    (episode.footage / "clip.mp4").write_bytes(b"fake")
+    monkeypatch.setattr("vlog_editor.render.probe_video", lambda _: {"has_audio": True})
+    monkeypatch.setattr("vlog_editor.render._encoder", lambda: ("h264_nvenc", ["-cq", "19"]))
+    command, _filters, _ = build_render_command(episode, _plan(), episode.output / "final.mp4")
+    # -filter_complex_script was removed in ffmpeg 7.0; must use the -/opt form.
+    assert "-/filter_complex" in command
+    assert "-filter_complex_script" not in command
+    # 4K/60 HEVC is unwatchably slow to software-decode: GPU decode by default.
+    assert "-hwaccel" in command
+    assert command[command.index("-hwaccel") + 1] == "cuda"
+    # -hwaccel is an input option: it must appear before the -i it applies to.
+    assert command.index("-hwaccel") < command.index("-i")
+
+
+def test_render_hwaccel_can_be_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    episode = _episode(tmp_path)
+    episode.config["output"]["hwaccel"] = "none"
+    (episode.footage / "clip.mp4").write_bytes(b"fake")
+    monkeypatch.setattr("vlog_editor.render.probe_video", lambda _: {"has_audio": True})
+    monkeypatch.setattr("vlog_editor.render._encoder", lambda: ("h264_nvenc", ["-cq", "19"]))
+    command, _filters, _ = build_render_command(episode, _plan(), episode.output / "final.mp4")
+    assert "-hwaccel" not in command
+
+
 def test_render_command_builds_game_main_with_camera_pip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -90,6 +120,54 @@ def test_render_command_builds_game_main_with_camera_pip(
     # Audio remains camera input 0; gameplay input 1 is visual-only.
     assert "[0:a]aresample=48000" in filters
     assert "[1:a]aresample=48000" not in filters
+
+
+def test_render_intro_holds_full_cam_then_dissolves_to_pip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    episode = _episode(tmp_path)
+    episode.config["gameplay"]["intro"] = {"cam_hold_sec": 3.0, "transition_sec": 1.0}
+    (episode.footage / "clip.mp4").write_bytes(b"camera")
+    (episode.gameplay / "game.mp4").write_bytes(b"game")
+    plan = _plan()
+    plan["structure"][0]["clips"][0]["gameplay"] = {
+        "file": "game.mp4",
+        "mode": "game_main_camera_pip",
+        "camera_offset_sec": 0.0,
+        "game_start_sec": 0.0,
+        "duration_sec": 10.0,
+        "audio_source": "camera",
+    }
+    monkeypatch.setattr("vlog_editor.render.probe_video", lambda _: {"has_audio": True})
+    monkeypatch.setattr("vlog_editor.render._encoder", lambda: ("h264_nvenc", ["-cq", "19"]))
+    _command, filters, _ = build_render_command(episode, plan, episode.output / "final.mp4")
+    # game + PIP are baked into one layer whose alpha fades in after the hold
+    assert "[game0][pip0]overlay=1330:726:eof_action=pass[compo0]" in filters
+    assert "fade=t=in:st=3.000:d=1.000:alpha=1[compo_fade0]" in filters
+    assert "[cam_base0][compo_fade0]overlay=0:0:eof_action=pass:" in filters
+    assert "enable='between(t,3.000,10.000)'[v0]" in filters
+    # the plain (non-intro) game_base path is not used for the intro cut
+    assert "game_base0" not in filters
+
+
+def test_intro_is_off_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    episode = _episode(tmp_path)
+    (episode.footage / "clip.mp4").write_bytes(b"camera")
+    (episode.gameplay / "game.mp4").write_bytes(b"game")
+    plan = _plan()
+    plan["structure"][0]["clips"][0]["gameplay"] = {
+        "file": "game.mp4",
+        "mode": "game_main_camera_pip",
+        "camera_offset_sec": 0.5,
+        "game_start_sec": 3.0,
+        "duration_sec": 1.0,
+        "audio_source": "camera",
+    }
+    monkeypatch.setattr("vlog_editor.render.probe_video", lambda _: {"has_audio": True})
+    monkeypatch.setattr("vlog_editor.render._encoder", lambda: ("h264_nvenc", ["-cq", "19"]))
+    _command, filters, _ = build_render_command(episode, plan, episode.output / "final.mp4")
+    assert "compo0" not in filters
+    assert "game_base0" in filters
 
 
 def test_bgm_graph_splits_original_audio_before_ducking(
