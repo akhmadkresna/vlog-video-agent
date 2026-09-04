@@ -96,13 +96,7 @@ def test_render_hwaccel_can_be_disabled(
     assert "-hwaccel" not in command
 
 
-def test_gameplay_layer_fills_frame_and_honours_source_crop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    episode = _episode(tmp_path)
-    episode.config["gameplay"]["source_crop"] = "1222:720:58:0"
-    (episode.footage / "clip.mp4").write_bytes(b"camera")
-    (episode.gameplay / "game.mp4").write_bytes(b"game")
+def _gameplay_plan() -> dict:
     plan = _plan()
     plan["structure"][0]["clips"][0]["gameplay"] = {
         "file": "game.mp4",
@@ -112,42 +106,46 @@ def test_gameplay_layer_fills_frame_and_honours_source_crop(
         "duration_sec": 2.0,
         "audio_source": "camera",
     }
+    return plan
+
+
+def test_gameplay_blur_fill_honours_source_crop_and_never_clips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    episode = _episode(tmp_path)
+    episode.config["gameplay"]["source_crop"] = "912:720:58:0"  # odd-aspect game view
+    (episode.footage / "clip.mp4").write_bytes(b"camera")
+    (episode.gameplay / "game.mp4").write_bytes(b"game")
     monkeypatch.setattr("vlog_editor.render.probe_video", lambda _: {"has_audio": True})
     monkeypatch.setattr("vlog_editor.render._encoder", lambda: ("h264_nvenc", ["-cq", "19"]))
-    _command, filters, _ = build_render_command(episode, plan, episode.output / "final.mp4")
-    game_line = next(line for line in filters.split(";\n") if line.strip().startswith("[1:v]"))
-    # literal crop applied, then cover-scale + centre-crop so no black bar shows
-    assert "crop=1222:720:58:0" in game_line
-    assert "force_original_aspect_ratio=increase" in game_line
-    assert f"crop={episode.config['output']['width']}:{episode.config['output']['height']}" in game_line
+    _command, filters, _ = build_render_command(
+        episode, _gameplay_plan(), episode.output / "final.mp4"
+    )
+    assert "crop=912:720:58:0" in filters             # literal crop applied
+    assert "boxblur" in filters                       # blurred backdrop
+    assert "scale=-2:1080:flags=bicubic" in filters   # foreground scaled to height, not cropped
+    assert "overlay=(W-w)/2:0" in filters             # game centred over the backdrop
     # camera layer still letterbox-safe (never crop faces)
     cam_line = next(line for line in filters.split(";\n") if line.strip().startswith("[0:v]"))
     assert "force_original_aspect_ratio=decrease" in cam_line
 
 
-def test_gameplay_source_crop_can_be_disabled(
+def test_gameplay_fill_mode_crop_is_opt_in(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     episode = _episode(tmp_path)
+    episode.config["gameplay"]["fill_mode"] = "crop"
     episode.config["gameplay"]["source_crop"] = "none"
     (episode.footage / "clip.mp4").write_bytes(b"camera")
     (episode.gameplay / "game.mp4").write_bytes(b"game")
-    plan = _plan()
-    plan["structure"][0]["clips"][0]["gameplay"] = {
-        "file": "game.mp4",
-        "mode": "game_main_camera_pip",
-        "camera_offset_sec": 0.0,
-        "game_start_sec": 0.0,
-        "duration_sec": 2.0,
-        "audio_source": "camera",
-    }
     monkeypatch.setattr("vlog_editor.render.probe_video", lambda _: {"has_audio": True})
     monkeypatch.setattr("vlog_editor.render._encoder", lambda: ("h264_nvenc", ["-cq", "19"]))
-    _command, filters, _ = build_render_command(episode, plan, episode.output / "final.mp4")
+    _command, filters, _ = build_render_command(
+        episode, _gameplay_plan(), episode.output / "final.mp4"
+    )
     game_line = next(line for line in filters.split(";\n") if line.strip().startswith("[1:v]"))
-    assert "crop=1222" not in game_line
-    # still fills the frame, just without a source-border trim
     assert "force_original_aspect_ratio=increase" in game_line
+    assert "boxblur" not in game_line
 
 
 def test_render_command_builds_game_main_with_camera_pip(

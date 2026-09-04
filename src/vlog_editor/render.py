@@ -78,6 +78,46 @@ def detect_source_crop(path: Path, *, sample_start: float = 20.0, sample_dur: fl
     return f"crop={w}:{h}:{x}:{y}"
 
 
+def _game_layer_filters(
+    *,
+    src_index: int,
+    tag: int,
+    crop: str | None,
+    width: int,
+    height: int,
+    fps: int,
+    pts_offset: float,
+    fill_mode: str = "blur",
+) -> list[str]:
+    """Filtergraph turning one gameplay input into ``[game{tag}]`` at width×height.
+
+    A windowed mobile capture is not 16:9. ``fill_mode="blur"`` (default) keeps
+    the whole game view centred over a blurred, zoomed copy of itself — no black
+    bars and nothing clipped. ``"crop"`` is the old cover-scale + centre-crop
+    (fine only when the source is already 16:9).
+    """
+    crop_prefix = f"{crop}," if crop else ""
+    shift = f"setpts=PTS+{pts_offset:.3f}/TB"
+    if fill_mode == "crop":
+        cover = (
+            f"[{src_index}:v]{crop_prefix}"
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},fps={fps},setsar=1,format=yuv420p,{shift}[game{tag}]"
+        )
+        return [cover]
+    bg = (
+        f"[gsrc_a{tag}]scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},boxblur=luma_radius=48:luma_power=2,"
+        f"eq=brightness=-0.05[gbg{tag}]"
+    )
+    return [
+        f"[{src_index}:v]{crop_prefix}fps={fps},setsar=1,split=2[gsrc_a{tag}][gsrc_b{tag}]",
+        bg,
+        f"[gsrc_b{tag}]scale=-2:{height}:flags=bicubic[gfg{tag}]",
+        f"[gbg{tag}][gfg{tag}]overlay=(W-w)/2:0,format=yuv420p,{shift}[game{tag}]",
+    ]
+
+
 def _transition_sfx_cues(
     episode: Episode,
     cards: list[dict[str, Any]],
@@ -195,6 +235,9 @@ def build_render_command(
     # baked-in black border once per file; a literal "w:h:x:y" forces it;
     # "none"/"off" disables.
     crop_setting = str(episode.config.get("gameplay", {}).get("source_crop", "auto")).strip().lower()
+    # "blur" (default) fits an odd-aspect capture without bars or clipping;
+    # "crop" is the plain cover-scale for a source that is already 16:9.
+    game_fill_mode = str(episode.config.get("gameplay", {}).get("fill_mode", "blur")).strip().lower()
     game_crop_cache: dict[str, str | None] = {}
 
     def _game_crop(path: Path) -> str | None:
@@ -326,16 +369,7 @@ def build_render_command(
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,"
             f"fps={fps},setsar=1,format=yuv420p,setpts=PTS-STARTPTS"
         )
-        # The gameplay layer fills the frame (cover + centre-crop) instead of
-        # letterboxing, and drops any detected source border first, so a
-        # partial-screen capture never shows a black bar behind the edit.
         game_crop = item.get("gameplay_crop")
-        game_normalize = (
-            (f"{game_crop}," if game_crop else "")
-            + f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},"
-            f"fps={fps},setsar=1,format=yuv420p,setpts=PTS-STARTPTS"
-        )
         gameplay = item.get("gameplay")
         if isinstance(gameplay, dict) and index == intro_index:
             game_index = int(item["gameplay_input_index"])
@@ -348,9 +382,17 @@ def build_render_command(
             filters.append(
                 f"[{index}:v]{video_normalize},split=2[cam_base{index}][cam_pip{index}]"
             )
-            filters.append(
-                f"[{game_index}:v]{game_normalize},"
-                f"setpts=PTS+{offset:.3f}/TB[game{index}]"
+            filters.extend(
+                _game_layer_filters(
+                    src_index=game_index,
+                    tag=index,
+                    crop=game_crop,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    pts_offset=offset,
+                    fill_mode=game_fill_mode,
+                )
             )
             filters.append(
                 f"[cam_pip{index}]scale={pip_width}:{pip_height},"
@@ -379,9 +421,17 @@ def build_render_command(
             filters.append(
                 f"[{index}:v]{video_normalize},split=2[cam_base{index}][cam_pip{index}]"
             )
-            filters.append(
-                f"[{game_index}:v]{game_normalize},"
-                f"setpts=PTS+{offset:.3f}/TB[game{index}]"
+            filters.extend(
+                _game_layer_filters(
+                    src_index=game_index,
+                    tag=index,
+                    crop=game_crop,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    pts_offset=offset,
+                    fill_mode=game_fill_mode,
+                )
             )
             filters.append(
                 f"[cam_base{index}][game{index}]overlay=0:0:eof_action=pass:"
