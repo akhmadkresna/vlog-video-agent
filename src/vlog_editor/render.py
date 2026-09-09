@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections import defaultdict
+import re
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,96 @@ from vlog_editor.transitions import (
     transitions_config,
 )
 from vlog_editor.validation import validate_audio_plan, validate_render_sources
+
+_CROP_RE = re.compile(r"crop=(\d+):(\d+):(\d+):(\d+)")
+
+
+def detect_source_crop(path: Path, *, sample_start: float = 20.0, sample_dur: float = 8.0) -> str | None:
+    """Find baked-in black borders in a video via ffmpeg cropdetect.
+
+    Returns an ffmpeg ``crop=w:h:x:y`` string, or ``None`` when the source
+    already fills its frame or the detection is not confident / would crop too
+    aggressively (a very dark scene can fool cropdetect). Used to strip the
+    black margin a partial-screen game capture leaves on one side.
+    """
+    try:
+        probe = run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-ss",
+                f"{max(0.0, sample_start):.3f}",
+                "-t",
+                f"{max(1.0, sample_dur):.3f}",
+                "-i",
+                str(path),
+                "-vf",
+                "cropdetect=limit=24:round=2:reset=0",
+                "-f",
+                "null",
+                "-",
+            ],
+            check=False,
+        )
+    except OSError:
+        return None
+    counts = Counter(_CROP_RE.findall(probe.stderr or ""))
+    if not counts:
+        return None
+    (w, h, x, y), hits = counts.most_common(1)[0]
+    w, h, x, y = int(w), int(h), int(x), int(y)
+    total = sum(counts.values())
+    meta = probe_video(path)
+    src_w, src_h = int(meta.get("width") or 0), int(meta.get("height") or 0)
+    if not src_w or not src_h or w <= 0 or h <= 0:
+        return None
+    # Require a stable reading and a real (but sane) border: 1–20% of a side.
+    if hits / total < 0.6:
+        return None
+    trimmed = (src_w - w) + (src_h - h)
+    if trimmed < 4 or (src_w - w) > src_w * 0.2 or (src_h - h) > src_h * 0.2:
+        return None
+    return f"crop={w}:{h}:{x}:{y}"
+
+
+def _game_layer_filters(
+    *,
+    src_index: int,
+    tag: int,
+    crop: str | None,
+    width: int,
+    height: int,
+    fps: int,
+    pts_offset: float,
+    fill_mode: str = "blur",
+) -> list[str]:
+    """Filtergraph turning one gameplay input into ``[game{tag}]`` at width×height.
+
+    A windowed mobile capture is not 16:9. ``fill_mode="blur"`` (default) keeps
+    the whole game view centred over a blurred, zoomed copy of itself — no black
+    bars and nothing clipped. ``"crop"`` is the old cover-scale + centre-crop
+    (fine only when the source is already 16:9).
+    """
+    crop_prefix = f"{crop}," if crop else ""
+    shift = f"setpts=PTS+{pts_offset:.3f}/TB"
+    if fill_mode == "crop":
+        cover = (
+            f"[{src_index}:v]{crop_prefix}"
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},fps={fps},setsar=1,format=yuv420p,{shift}[game{tag}]"
+        )
+        return [cover]
+    bg = (
+        f"[gsrc_a{tag}]scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},boxblur=luma_radius=48:luma_power=2,"
+        f"eq=brightness=-0.05[gbg{tag}]"
+    )
+    return [
+        f"[{src_index}:v]{crop_prefix}fps={fps},setsar=1,split=2[gsrc_a{tag}][gsrc_b{tag}]",
+        bg,
+        f"[gsrc_b{tag}]scale=-2:{height}:flags=bicubic[gfg{tag}]",
+        f"[gbg{tag}][gfg{tag}]overlay=(W-w)/2:0,format=yuv420p,{shift}[game{tag}]",
+    ]
 
 
 def _transition_sfx_cues(
@@ -140,6 +231,25 @@ def build_render_command(
             }
         )
 
+    # gameplay.source_crop: "auto" (default) strips a partial-screen capture's
+    # baked-in black border once per file; a literal "w:h:x:y" forces it;
+    # "none"/"off" disables.
+    crop_setting = str(episode.config.get("gameplay", {}).get("source_crop", "auto")).strip().lower()
+    # "blur" (default) fits an odd-aspect capture without bars or clipping;
+    # "crop" is the plain cover-scale for a source that is already 16:9.
+    game_fill_mode = str(episode.config.get("gameplay", {}).get("fill_mode", "blur")).strip().lower()
+    game_crop_cache: dict[str, str | None] = {}
+
+    def _game_crop(path: Path) -> str | None:
+        if crop_setting in {"", "none", "off", "false"}:
+            return None
+        if crop_setting not in {"auto"}:
+            return crop_setting if crop_setting.startswith("crop=") else f"crop={crop_setting}"
+        key = str(path)
+        if key not in game_crop_cache:
+            game_crop_cache[key] = detect_source_crop(path)
+        return game_crop_cache[key]
+
     gameplay_input_count = 0
     for item in metadata:
         gameplay = item.get("gameplay")
@@ -159,6 +269,7 @@ def build_render_command(
             str(game_path),
         ]
         item["gameplay_input_index"] = len(selections) + gameplay_input_count
+        item["gameplay_crop"] = _game_crop(game_path)
         gameplay_input_count += 1
 
     content_total = sum(item["duration"] for item in metadata)
@@ -258,6 +369,7 @@ def build_render_command(
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,"
             f"fps={fps},setsar=1,format=yuv420p,setpts=PTS-STARTPTS"
         )
+        game_crop = item.get("gameplay_crop")
         gameplay = item.get("gameplay")
         if isinstance(gameplay, dict) and index == intro_index:
             game_index = int(item["gameplay_input_index"])
@@ -270,9 +382,17 @@ def build_render_command(
             filters.append(
                 f"[{index}:v]{video_normalize},split=2[cam_base{index}][cam_pip{index}]"
             )
-            filters.append(
-                f"[{game_index}:v]{video_normalize},"
-                f"setpts=PTS+{offset:.3f}/TB[game{index}]"
+            filters.extend(
+                _game_layer_filters(
+                    src_index=game_index,
+                    tag=index,
+                    crop=game_crop,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    pts_offset=offset,
+                    fill_mode=game_fill_mode,
+                )
             )
             filters.append(
                 f"[cam_pip{index}]scale={pip_width}:{pip_height},"
@@ -301,9 +421,17 @@ def build_render_command(
             filters.append(
                 f"[{index}:v]{video_normalize},split=2[cam_base{index}][cam_pip{index}]"
             )
-            filters.append(
-                f"[{game_index}:v]{video_normalize},"
-                f"setpts=PTS+{offset:.3f}/TB[game{index}]"
+            filters.extend(
+                _game_layer_filters(
+                    src_index=game_index,
+                    tag=index,
+                    crop=game_crop,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    pts_offset=offset,
+                    fill_mode=game_fill_mode,
+                )
             )
             filters.append(
                 f"[cam_base{index}][game{index}]overlay=0:0:eof_action=pass:"
@@ -325,6 +453,11 @@ def build_render_command(
             filters.append(
                 f"[{index}:a]aresample=48000,"
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+                # Speech cleanup: drop handling rumble / room boom, then even out
+                # the wide loudness swing between an adult talking near the mic
+                # and a kid across the room so dialogue stays intelligible.
+                "highpass=f=85,"
+                "acompressor=threshold=-20dB:ratio=3:attack=6:release=180:makeup=4,"
                 f"atrim=duration={duration:.3f},apad=pad_dur={duration:.3f},"
                 f"atrim=duration={duration:.3f},asetpts=PTS-STARTPTS,"
                 f"afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out:.3f}:d=0.03[a{index}]"
@@ -402,9 +535,12 @@ def build_render_command(
         dialogue_label = "[dialogue_fx]"
         next_input += len(cue_paths)
 
-    # Light dialogue loudness normalize so speech stays clear under beds/SFX.
+    # Even out clip-to-clip level, then anchor the whole mix to a consistent
+    # broadcast speech loudness (~-15 LUFS) so dialogue reads clearly under
+    # beds/SFX and across cuts.
     filters.append(
-        f"{dialogue_label}dynaudnorm=f=150:g=12:p=0.9[dialogue_norm]"
+        f"{dialogue_label}dynaudnorm=f=200:g=15:p=0.9,"
+        "loudnorm=I=-15:TP=-1.5:LRA=11[dialogue_norm]"
     )
     dialogue_label = "[dialogue_norm]"
 
@@ -461,8 +597,8 @@ def build_render_command(
                     # Duck fully under speech. makeup must stay 1: any makeup gain is
                     # applied to the whole bed, which re-raises music above dialogue and
                     # cancels the ducking it is supposed to help.
-                    "[music][sidechain]sidechaincompress=threshold=0.03:ratio=8:"
-                    "attack=15:release=450:makeup=1:mix=1[ducked]"
+                    "[music][sidechain]sidechaincompress=threshold=0.05:ratio=12:"
+                    "attack=8:release=320:makeup=1:mix=1[ducked]"
                 ),
                 "[original][ducked]amix=inputs=2:duration=first:normalize=0[aout]",
             ]
