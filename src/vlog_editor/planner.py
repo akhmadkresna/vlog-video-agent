@@ -25,7 +25,7 @@ from vlog_editor.kids_interest import (
     source_wow_summary,
 )
 from vlog_editor.gameplay import attach_gameplay_matches
-from vlog_editor.media import item_daypart, probe_video
+from vlog_editor.media import item_daypart, local_clock, probe_video
 from vlog_editor.project import Episode, read_json, write_json
 from vlog_editor.validation import infer_setting, validate_and_fix_plan, validate_audio_plan
 from vlog_editor.vision import OllamaClient, parse_json_response
@@ -587,15 +587,18 @@ TIME_OF_DAY_BUCKETS = (
 )
 
 
-def time_of_day_bucket(capture_time: str) -> str:
-    """Simple daypart label (Morning/Afternoon/Evening/Night) from a capture_time hour."""
-    text = str(capture_time or "").strip()
-    if len(text) < 13 or text[10] not in ("T", " "):
+def time_of_day_bucket(capture_time: str, filename: str = "") -> str:
+    """Daypart label (Morning/Afternoon/Evening/Night) from the LOCAL clock.
+
+    DJI filenames carry the local wall time; ISO ``capture_time`` is often UTC,
+    so a naive hour slice mislabels footage shot outside UTC (e.g. an evening
+    snack run reads as "Morning"). Derive the hour the same way
+    ``item_daypart`` does so cluster labels and cluster ordering agree.
+    """
+    clock = local_clock(capture_time, filename)
+    if clock is None:
         return "Night"
-    try:
-        hour = int(text[11:13])
-    except ValueError:
-        return "Night"
+    hour = clock[0]
     for start_hour, end_hour, name in TIME_OF_DAY_BUCKETS:
         if start_hour <= hour < end_hour:
             return name
@@ -616,7 +619,10 @@ def cluster_contiguous_scenes(items: list[dict[str, Any]]) -> list[list[dict[str
     keys: list[tuple[str, str]] = []
     for item in ordered:
         capture_time = str(item.get("_capture_time") or "")
-        key = (capture_time[:10], time_of_day_bucket(capture_time))
+        key = (
+            capture_time[:10],
+            time_of_day_bucket(capture_time, str(item.get("file", ""))),
+        )
         if clusters and keys[-1] == key:
             clusters[-1].append(item)
         else:
@@ -1653,7 +1659,10 @@ def build_balanced_fallback_plan(
             if not cluster:
                 continue
             ranked = rank_clips_within_scene(cluster)
-            daypart = time_of_day_bucket(str(ranked[0].get("_capture_time") or ""))
+            daypart = time_of_day_bucket(
+                str(ranked[0].get("_capture_time") or ""),
+                str(ranked[0].get("file", "")),
+            )
             structure.append(_storyboard_section(daypart, ranked))
     else:
         current_setting: str | None = None
