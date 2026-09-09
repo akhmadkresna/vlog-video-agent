@@ -9,8 +9,12 @@ __pycache__/
 
 # Episode-generated media and analysis
 footage/
+gameplay/
 work/
 output/
+
+# Dated local episodes kept beside this framework (media stays on disk)
+/[0-9][0-9][0-9][0-9]-*/
 *.mp4
 *.mov
 *.mkv
