@@ -1374,6 +1374,31 @@ def build_balanced_fallback_plan(
             item["note"] = f"{note} CTA close b-roll.".strip()
             cta_selection = item
 
+    # A spoken "Arrival" beat is hoisted into its own section right after the
+    # open. That only reads as chronological when the arrival clip is the
+    # earliest body footage — otherwise section 2 sits later than section 3 and
+    # plan validation rejects the capture-time regression. If earlier body
+    # footage was selected, demote the arrival to a normal middle clip so the
+    # chronological sort below drops it into its natural place.
+    if arrival_selection is not None:
+        arrival_cap = str(arrival_selection.get("_capture_time") or "")
+        earliest_body_cap = min(
+            (
+                str(clip.get("_capture_time") or "9999")
+                for clip in selected
+                if clip.get("_role") == "middle"
+            ),
+            default="9999",
+        )
+        if arrival_cap and earliest_body_cap != "9999" and arrival_cap > earliest_body_cap:
+            arrival_selection["_role"] = "middle"
+            arrival_selection["note"] = (
+                str(arrival_selection.get("note", ""))
+                .replace("Destination arrival narration.", "")
+                .strip()
+            )
+            arrival_selection = None
+
     if arc == "chronological":
         selected.sort(
             key=lambda clip: (
